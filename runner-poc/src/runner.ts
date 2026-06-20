@@ -1,6 +1,7 @@
 import { resolveDbPath } from "./db-path.ts";
 import {
   type GitLogProcess,
+  lsTreeFiles,
   revParse,
   revParseToplevel,
   spawnFullLog,
@@ -25,6 +26,7 @@ export interface ExtractResult {
   mode: "full" | "incremental";
   commitsWritten: number;
   tipSha: string;
+  trackedFiles: number;
 }
 
 /**
@@ -51,12 +53,17 @@ export async function extract(opts: ExtractOptions): Promise<ExtractResult> {
 
     const commitsWritten = await consume(child, store);
     store.setMeta("last_sha", tipSha); // pin to the exact tip we extracted to
+
+    const tracked = lsTreeFiles(toplevel, tipSha);
+    store.replaceTrackedFiles(tracked, tipSha);
+
     return {
       dbPath,
       toplevel,
       mode: incremental ? "incremental" : "full",
       commitsWritten,
       tipSha,
+      trackedFiles: tracked.length,
     };
   } finally {
     db.close();

@@ -14,6 +14,7 @@ function freshDb() {
     CREATE TABLE rename_edge (commit_sha TEXT NOT NULL, old_path TEXT NOT NULL,
       new_path TEXT NOT NULL, similarity INTEGER);
     CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+    CREATE TABLE tracked_file (path TEXT PRIMARY KEY);
   `);
   return db;
 }
@@ -71,7 +72,7 @@ describe("Storage", () => {
     expect(pc).toEqual({ p: 2 });
   });
 
-  it("is idempotent on replay — no duplicate file_change rows", () => {
+  it("is idempotent on replay; no duplicate file_change rows", () => {
     const batch = [commit("aaa", { files: [{ path: "a.ts", added: 3, deleted: 1 }] })];
     store.writeBatch(batch);
     store.writeBatch(batch); // replay same commit (crash/overlap)
@@ -84,5 +85,19 @@ describe("Storage", () => {
     store.setMeta("ref", "refs/heads/main");
     expect(store.getMeta("ref")).toBe("refs/heads/main");
     expect(store.getMeta("missing")).toBeUndefined();
+  });
+
+  it("replaces the tracked_file snapshot wholesale and pins tracked_sha", () => {
+    store.replaceTrackedFiles(["a.ts", "lib/b.ts"], "aaa");
+    expect(store.summary().tracked).toBe(2);
+    expect(store.getMeta("tracked_sha")).toBe("aaa");
+
+    store.replaceTrackedFiles(["lib/b.ts", "c.ts"], "bbb");
+    const paths = db
+      .prepare("SELECT path FROM tracked_file ORDER BY path")
+      .all()
+      .map((r) => (r as { path: string }).path);
+    expect(paths).toEqual(["c.ts", "lib/b.ts"]);
+    expect(store.getMeta("tracked_sha")).toBe("bbb");
   });
 });

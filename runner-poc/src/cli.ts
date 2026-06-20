@@ -25,7 +25,8 @@ async function main(argv: string[]): Promise<void> {
     });
     console.log(
       `[${res.mode}] wrote ${res.commitsWritten} commits for ${values.ref}\n` +
-      `  repo: ${res.toplevel}\n  db:   ${res.dbPath}\n  tip:  ${res.tipSha}`,
+      `  repo:    ${res.toplevel}\n  db:      ${res.dbPath}\n  tip:     ${res.tipSha}\n` +
+      `  tracked: ${res.trackedFiles} files`,
     );
     return;
   }
@@ -42,7 +43,7 @@ async function main(argv: string[]): Promise<void> {
       const s = new Storage(db).summary();
       console.log(
         `db: ${dbPath}\ncommits: ${s.commits}\nfile_changes: ${s.files}\n` +
-        `renames: ${s.renames}\nlast_sha: ${s.lastSha ?? "(none)"}`,
+        `renames: ${s.renames}\ntracked_files: ${s.tracked}\nlast_sha: ${s.lastSha ?? "(none)"}`,
       );
     } finally {
       db.close();

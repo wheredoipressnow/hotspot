@@ -1,7 +1,6 @@
 import Database from "better-sqlite3";
 import type { CommitRecord } from "./types.ts";
 
-// Schema from HANDOFF.md §3 — raw facts only, never derived scores.
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS commit_info (
   sha          TEXT PRIMARY KEY,
@@ -32,7 +31,10 @@ CREATE TABLE IF NOT EXISTS meta (
   value TEXT
 );
 
--- Indexes serve the two real analysis query shapes (HANDOFF §5).
+CREATE TABLE IF NOT EXISTS tracked_file (
+  path TEXT PRIMARY KEY
+);
+
 CREATE INDEX IF NOT EXISTS idx_file_change_commit ON file_change(commit_sha);
 CREATE INDEX IF NOT EXISTS idx_file_change_path   ON file_change(path);
 CREATE INDEX IF NOT EXISTS idx_commit_committed   ON commit_info(committed_at);
@@ -60,10 +62,13 @@ export class Storage {
     insCommit: Database.Statement;
     insFile: Database.Statement;
     insRename: Database.Statement;
+    delTracked: Database.Statement;
+    insTracked: Database.Statement;
     setMeta: Database.Statement;
     getMeta: Database.Statement;
   };
   private readonly runBatch: (commits: CommitRecord[]) => void;
+  private readonly runReplaceTracked: (paths: string[], sha: string) => void;
 
   constructor(db: DB) {
     this.db = db;
@@ -81,6 +86,8 @@ export class Storage {
       insRename: db.prepare(
         "INSERT INTO rename_edge (commit_sha, old_path, new_path, similarity) VALUES (?, ?, ?, ?)",
       ),
+      delTracked: db.prepare("DELETE FROM tracked_file"),
+      insTracked: db.prepare("INSERT OR IGNORE INTO tracked_file (path) VALUES (?)"),
       setMeta: db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)"),
       getMeta: db.prepare("SELECT value FROM meta WHERE key = ?"),
     };
@@ -102,12 +109,28 @@ export class Storage {
       const last = commits.at(-1);
       if (last) this.stmts.setMeta.run("last_sha", last.sha);
     });
+
+    // Replace the whole tracked_file snapshot and pin tracked_sha, in one transaction.
+    this.runReplaceTracked = db.transaction((paths: string[], sha: string) => {
+      this.stmts.delTracked.run();
+      for (const p of paths) this.stmts.insTracked.run(p);
+      this.stmts.setMeta.run("tracked_sha", sha);
+    });
   }
 
   /** Write a batch of commits atomically. Caller batches (e.g. N=1000) before calling. */
   writeBatch(commits: CommitRecord[]): void {
     if (commits.length === 0) return;
     this.runBatch(commits);
+  }
+
+  /**
+   * Replace the `tracked_file` snapshot with the files present at `sha` and pin
+   * `meta('tracked_sha')`. A whole-tree snapshot, so it is always replaced (not
+   * appended), keeping the `tracked_sha == last_sha` invariant the reader checks.
+   */
+  replaceTrackedFiles(paths: string[], sha: string): void {
+    this.runReplaceTracked(paths, sha);
   }
 
   getMeta(key: string): string | undefined {
@@ -120,13 +143,20 @@ export class Storage {
   }
 
   /** Row counts + last_sha, for verification/dump. */
-  summary(): { commits: number; files: number; renames: number; lastSha?: string } {
+  summary(): {
+    commits: number;
+    files: number;
+    renames: number;
+    tracked: number;
+    lastSha?: string;
+  } {
     const count = (t: string) =>
       (this.db.prepare(`SELECT COUNT(*) AS n FROM ${t}`).get() as { n: number }).n;
     return {
       commits: count("commit_info"),
       files: count("file_change"),
       renames: count("rename_edge"),
+      tracked: count("tracked_file"),
       lastSha: this.getMeta("last_sha"),
     };
   }

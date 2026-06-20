@@ -19,6 +19,19 @@ export function revParse(cwd: string, ref: string): string {
   return run(cwd, ["rev-parse", "--verify", `${ref}^{commit}`]).trim();
 }
 
+export function lsTreeFiles(cwd: string, ref: string): string[] {
+  const out = run(cwd, [
+    "-c",
+    "core.quotePath=false",
+    "ls-tree",
+    "-r",
+    "--name-only",
+    "-z",
+    ref,
+  ]);
+  return out.split("\0").filter((p) => p.length > 0);
+}
+
 /**
  * Spawn a full-history extraction: oldest->newest (`--reverse`) so meta.last_sha
  * advances monotonically and an interrupted run can safely resume. Rename detection

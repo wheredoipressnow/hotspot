@@ -1,6 +1,3 @@
-// Raw facts extracted from `git log` — the binding contract from HANDOFF.md §3.
-// These mirror the storage schema exactly; nothing derived lives here.
-
 /** One file touched in one commit. `added`/`deleted` are null for binary files. */
 export interface FileChange {
   path: string;
