@@ -1,17 +1,24 @@
 defmodule HotspotWeb.HotspotLive do
   @moduledoc """
   Circle-packing view of repo hotspots. Owns the visualization parameters (metric,
-  path filter) and pushes the nested tree to the `CirclePack` JS hook. Reads only
-  through `Hotspot.Analysis` — never the Repo (HANDOFF §2).
+  path filter, include-removed, labels) and pushes the nested tree to the
+  `CirclePack` JS hook. Reads only through `Hotspot.Analysis` — never the Repo
+  (HANDOFF §2).
 
-  No db is loaded at boot: when none is open it renders a picker of the available
-  databases (`Hotspot.Storage`); selecting one opens it and reveals the chart.
+  Layout is a full-height row: a docked **Controls** panel (db selection + options)
+  on the left, the chart filling the middle, and a docked **Top hotspots** panel on
+  the right. Each panel collapses to a thin rail so the chart can reclaim the width;
+  the chart reflows live because its SVG scales to its container.
+
+  No db is loaded at boot: until one is selected the chart area shows a hint and the
+  Controls panel lists the available databases (`Hotspot.Storage`).
   """
   use HotspotWeb, :live_view
 
   alias Hotspot.{Analysis, Storage}
 
   @metrics [{"Churn", "churn"}, {"Author count", "author_count"}]
+  @top_limit 25
 
   @impl true
   def mount(_params, _session, socket) do
@@ -21,7 +28,13 @@ defmodule HotspotWeb.HotspotLive do
      assign(socket,
        metric: "churn",
        path_filter: "",
+       include_removed: true,
+       show_labels: false,
        metrics: @metrics,
+       hotspots_scope: "files",
+       hotspots: [],
+       prefs_open: true,
+       hotspots_open: true,
        dbs: Storage.list(),
        current: Storage.current()
      )}
@@ -30,128 +43,315 @@ defmodule HotspotWeb.HotspotLive do
   @impl true
   # The hook asks for data once it has mounted on the client.
   def handle_event("hotspot:ready", _params, socket) do
-    {:noreply, push_tree(socket)}
+    {:noreply, refresh(socket)}
   end
 
   def handle_event("update", params, socket) do
     socket
     |> assign(
       metric: params["metric"] || socket.assigns.metric,
-      path_filter: params["path_filter"] || socket.assigns.path_filter
+      path_filter: params["path_filter"] || socket.assigns.path_filter,
+      include_removed: params["include_removed"] == "true",
+      show_labels: params["show_labels"] == "true"
     )
-    |> push_tree()
+    |> refresh()
     |> then(&{:noreply, &1})
   end
+
+  def handle_event("set_scope", %{"scope" => scope}, socket) do
+    {:noreply, socket |> assign(hotspots_scope: scope) |> assign_hotspots()}
+  end
+
+  def handle_event("open_db", %{"db" => ""}, socket), do: {:noreply, socket}
 
   def handle_event("open_db", %{"db" => path}, socket) do
     Storage.open(path)
     {:noreply, socket}
   end
 
-  def handle_event("close_db", _params, socket) do
-    Storage.close()
-    {:noreply, socket}
+  def handle_event("toggle_prefs", _params, socket) do
+    {:noreply, update(socket, :prefs_open, &(!&1))}
+  end
+
+  def handle_event("toggle_hotspots", _params, socket) do
+    {:noreply, update(socket, :hotspots_open, &(!&1))}
+  end
+
+  def handle_event("zoom_to", %{"path" => path}, socket) do
+    {:noreply, push_event(socket, "hotspot:zoom", %{path: path})}
   end
 
   @impl true
   def handle_info({:storage_changed, current}, socket) do
-    socket = assign(socket, current: current, dbs: Storage.list())
-    {:noreply, if(current, do: push_tree(socket), else: socket)}
+    # Path filter is repo-specific, so clear it on a db switch; other prefs persist.
+    socket = assign(socket, current: current, dbs: Storage.list(), path_filter: "")
+    {:noreply, if(current, do: refresh(socket), else: assign(socket, hotspots: []))}
   end
 
-  defp push_tree(%{assigns: %{current: nil}} = socket), do: socket
+  # Recompute both views: push the tree to the hook and assign the ranked list.
+  defp refresh(%{assigns: %{current: nil}} = socket), do: socket
+
+  defp refresh(socket) do
+    socket
+    |> push_tree()
+    |> assign_hotspots()
+  end
 
   defp push_tree(socket) do
-    case Analysis.tree_for_visualization(%{path_filter: socket.assigns.path_filter}) do
+    params = %{
+      path_filter: socket.assigns.path_filter,
+      include_removed: socket.assigns.include_removed
+    }
+
+    case Analysis.tree_for_visualization(params) do
       {:error, :no_database} ->
         socket
 
       tree ->
-        push_event(socket, "hotspot:tree", %{tree: tree, metric: socket.assigns.metric})
+        push_event(socket, "hotspot:tree", %{
+          tree: tree,
+          metric: socket.assigns.metric,
+          labels: socket.assigns.show_labels
+        })
     end
+  end
+
+  defp assign_hotspots(%{assigns: %{current: nil}} = socket), do: assign(socket, hotspots: [])
+
+  defp assign_hotspots(socket) do
+    params = %{
+      metric: socket.assigns.metric,
+      scope: socket.assigns.hotspots_scope,
+      include_removed: socket.assigns.include_removed,
+      path_filter: socket.assigns.path_filter,
+      limit: @top_limit
+    }
+
+    hotspots =
+      case Analysis.top_hotspots(params) do
+        {:error, :no_database} -> []
+        rows -> rows
+      end
+
+    assign(socket, hotspots: hotspots)
   end
 
   @impl true
   def render(assigns) do
     ~H"""
-    <div class="p-4 space-y-4">
-      <h1 class="text-xl font-semibold">Hotspots</h1>
+    <div class="h-screen flex overflow-hidden">
+      <.panel open={@prefs_open} side="left" title="Controls" toggle="toggle_prefs">
+        <.controls
+          dbs={@dbs}
+          current={@current}
+          metric={@metric}
+          metrics={@metrics}
+          path_filter={@path_filter}
+          include_removed={@include_removed}
+          show_labels={@show_labels}
+        />
+      </.panel>
 
-      <.db_picker :if={is_nil(@current)} dbs={@dbs} />
-
-      <div :if={@current}>
-        <div class="flex items-center gap-2 text-sm mb-2">
-          <span class="opacity-70">Database:</span>
-          <span class="font-mono">{Path.basename(@current)}</span>
-          <button type="button" phx-click="close_db" class="btn btn-xs btn-ghost">change</button>
-        </div>
-
-        <form phx-change="update" class="flex flex-wrap gap-4 items-end">
-          <label class="flex flex-col gap-1">
-            <span class="text-sm">Metric (size)</span>
-            <select name="metric" class="select select-bordered">
-              <option :for={{label, value} <- @metrics} value={value} selected={value == @metric}>
-                {label}
-              </option>
-            </select>
-          </label>
-
-          <label class="flex flex-col gap-1 flex-1 min-w-60">
-            <span class="text-sm">Path filter</span>
-            <input
-              type="text"
-              name="path_filter"
-              value={@path_filter}
-              phx-debounce="300"
-              placeholder="e.g. lib/"
-              class="input input-bordered"
-            />
-          </label>
-        </form>
-
-        <p class="text-sm opacity-70 mt-2">
-          Bubble size = selected metric, color = distinct authors. Click a directory to zoom,
-          click the background to zoom out.
-        </p>
-
+      <div class="flex-1 relative min-w-0 bg-base-100">
         <div
+          :if={@current}
           id="hotspot-chart"
           phx-hook="CirclePack"
           phx-update="ignore"
-          class="w-full rounded-box border border-base-300 mt-2"
-          style="height: 75vh;"
+          class="w-full h-full"
         >
         </div>
+        <div :if={is_nil(@current)} class="h-full flex items-center justify-center px-6">
+          <p class="text-sm opacity-60 text-center">
+            ← Open a database in the <span class="font-semibold">Controls</span>
+            panel to see hotspots.
+          </p>
+        </div>
       </div>
+
+      <.panel open={@hotspots_open} side="right" title="Top hotspots" toggle="toggle_hotspots">
+        <.top_hotspots current={@current} scope={@hotspots_scope} hotspots={@hotspots} metric={@metric} />
+      </.panel>
     </div>
     """
   end
 
-  defp db_picker(assigns) do
+  # --- Reusable docked panel -------------------------------------------------
+
+  attr(:open, :boolean, required: true)
+  attr(:title, :string, required: true)
+  attr(:side, :string, default: "left", values: ~w(left right))
+  attr(:toggle, :string, required: true, doc: "phx-click event that flips `open`")
+  slot(:inner_block, required: true)
+
+  defp panel(assigns) do
     ~H"""
-    <div class="space-y-3">
-      <p class="text-sm opacity-70">Open a database to analyze.</p>
+    <div class={[
+      "shrink-0 h-full flex flex-col bg-base-200 border-base-300 transition-[width] duration-200",
+      @side == "left" && "border-r",
+      @side == "right" && "border-l",
+      @open && "w-72",
+      !@open && "w-10"
+    ]}>
+      <div :if={@open} class="flex items-center justify-between px-3 py-2 border-b border-base-300">
+        <span class="text-sm font-semibold">{@title}</span>
+        <button type="button" phx-click={@toggle} class="btn btn-xs btn-ghost" title="Minimize">
+          <.icon name={chevron(@side, :collapse)} class="size-4" />
+        </button>
+      </div>
 
-      <p :if={@dbs == []} class="text-sm opacity-70">
-        No databases found. Point <code class="font-mono">HOTSPOT_DB_DIR</code>
-        at a folder of runner-produced <code class="font-mono">.db</code> files.
-      </p>
+      <div :if={@open} class="overflow-y-auto grow p-3 space-y-4">
+        {render_slot(@inner_block)}
+      </div>
 
-      <ul class="menu bg-base-200 rounded-box w-full max-w-xl">
-        <li :for={db <- @dbs}>
-          <button type="button" phx-click="open_db" phx-value-db={db.path} class="flex justify-between">
-            <span class="font-mono">{db.name}</span>
-            <span class="opacity-60 text-xs">{format_size(db.size)}</span>
+      <button
+        :if={!@open}
+        type="button"
+        phx-click={@toggle}
+        class="h-full w-full flex flex-col items-center gap-3 py-3 hover:bg-base-300"
+        title={"Expand #{@title}"}
+      >
+        <.icon name={chevron(@side, :expand)} class="size-4 opacity-70" />
+        <span class="text-xs opacity-70 [writing-mode:vertical-rl]">{@title}</span>
+      </button>
+    </div>
+    """
+  end
+
+  # Collapse points "into" the panel; expand points "out" toward the chart.
+  defp chevron("left", :collapse), do: "hero-chevron-double-left"
+  defp chevron("left", :expand), do: "hero-chevron-double-right"
+  defp chevron("right", :collapse), do: "hero-chevron-double-right"
+  defp chevron("right", :expand), do: "hero-chevron-double-left"
+
+  # --- Controls panel body ---------------------------------------------------
+
+  attr(:dbs, :list, required: true)
+  attr(:current, :string, default: nil)
+  attr(:metric, :string, required: true)
+  attr(:metrics, :list, required: true)
+  attr(:path_filter, :string, required: true)
+  attr(:include_removed, :boolean, required: true)
+  attr(:show_labels, :boolean, required: true)
+
+  defp controls(assigns) do
+    ~H"""
+    <form id="db-form" phx-change="open_db">
+      <label class="flex flex-col gap-1">
+        <span class="text-sm">Database</span>
+        <select name="db" class="select select-bordered select-sm">
+          <option value="" disabled selected={is_nil(@current)}>Choose…</option>
+          <option :for={db <- @dbs} value={db.path} selected={@current == db.path}>
+            {db.name}
+          </option>
+        </select>
+      </label>
+    </form>
+
+    <p :if={@dbs == []} class="text-xs opacity-70">
+      No databases found. Point <code class="font-mono">HOTSPOT_DB_DIR</code>
+      at a folder of runner-produced <code class="font-mono">.db</code> files.
+    </p>
+
+    <form id="options-form" phx-change="update" class="space-y-3">
+      <label class="flex flex-col gap-1">
+        <span class="text-sm">Metric (size)</span>
+        <select name="metric" class="select select-bordered select-sm">
+          <option :for={{label, value} <- @metrics} value={value} selected={value == @metric}>
+            {label}
+          </option>
+        </select>
+      </label>
+
+      <label class="flex flex-col gap-1">
+        <span class="text-sm">Path filter</span>
+        <input
+          type="text"
+          name="path_filter"
+          value={@path_filter}
+          phx-debounce="300"
+          placeholder="e.g. lib/"
+          class="input input-bordered input-sm"
+        />
+      </label>
+
+      <label class="flex items-center gap-2 cursor-pointer">
+        <input type="hidden" name="include_removed" value="false" />
+        <input
+          type="checkbox"
+          name="include_removed"
+          value="true"
+          checked={@include_removed}
+          class="checkbox checkbox-sm"
+        />
+        <span class="text-sm">Include removed / renamed files</span>
+      </label>
+
+      <label class="flex items-center gap-2 cursor-pointer">
+        <input type="hidden" name="show_labels" value="false" />
+        <input
+          type="checkbox"
+          name="show_labels"
+          value="true"
+          checked={@show_labels}
+          class="checkbox checkbox-sm"
+        />
+        <span class="text-sm">Show labels</span>
+      </label>
+    </form>
+
+    <div class="pt-2 border-t border-base-300 flex items-center justify-between">
+      <span class="text-sm">Theme</span>
+      <Layouts.theme_toggle />
+    </div>
+    """
+  end
+
+  # --- Top hotspots panel body -----------------------------------------------
+
+  attr(:current, :string, default: nil)
+  attr(:scope, :string, required: true)
+  attr(:hotspots, :list, required: true)
+  attr(:metric, :string, required: true)
+
+  defp top_hotspots(assigns) do
+    ~H"""
+    <p :if={is_nil(@current)} class="text-sm opacity-60">Open a database first.</p>
+
+    <div :if={@current}>
+      <form id="scope-form" phx-change="set_scope" class="mb-3">
+        <label class="flex flex-col gap-1">
+          <span class="text-sm">Scope</span>
+          <select name="scope" class="select select-bordered select-sm">
+            <option value="files" selected={@scope == "files"}>Files</option>
+            <option value="folders" selected={@scope == "folders"}>Folders</option>
+          </select>
+        </label>
+      </form>
+
+      <p :if={@hotspots == []} class="text-sm opacity-60">No data.</p>
+
+      <ol class="space-y-1">
+        <li :for={{h, i} <- Enum.with_index(@hotspots, 1)}>
+          <button
+            type="button"
+            phx-click="zoom_to"
+            phx-value-path={h.path}
+            class="w-full text-left flex items-center gap-2 px-2 py-1 rounded hover:bg-base-300"
+            title={h.path}
+          >
+            <span class="text-xs opacity-50 w-5 shrink-0">{i}</span>
+            <span class="font-mono text-xs truncate grow">{h.path}</span>
+            <span class="text-xs opacity-70 shrink-0">
+              {metric_value(h, @metric)}
+            </span>
           </button>
         </li>
-      </ul>
+      </ol>
     </div>
     """
   end
 
-  defp format_size(bytes) when bytes >= 1_048_576,
-    do: "#{Float.round(bytes / 1_048_576, 1)} MB"
-
-  defp format_size(bytes) when bytes >= 1024, do: "#{Float.round(bytes / 1024, 1)} KB"
-  defp format_size(bytes), do: "#{bytes} B"
+  defp metric_value(h, "author_count"), do: "#{h.author_count}a"
+  defp metric_value(h, _churn), do: h.churn
 end

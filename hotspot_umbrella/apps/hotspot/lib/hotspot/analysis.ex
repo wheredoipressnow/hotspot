@@ -24,6 +24,14 @@ defmodule Hotspot.Analysis do
   end
 
   @doc """
+  Ranked top hotspots for the overview list. See `Hotspot.Analysis.Hotspots`.
+  Returns `{:error, :no_database}` when no db is open.
+  """
+  def top_hotspots(params \\ %{}) do
+    with_database(fn -> Hotspot.Analysis.Hotspots.top(params) end)
+  end
+
+  @doc """
   Summary counts for the extracted repo — smoke test of the read path.
   Returns `{:error, :no_database}` when no db is open.
   """

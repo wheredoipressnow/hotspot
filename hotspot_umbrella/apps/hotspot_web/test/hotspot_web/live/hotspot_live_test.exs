@@ -16,7 +16,8 @@ defmodule HotspotWeb.HotspotLiveTest do
     reopen_fixture()
 
     {:ok, _view, html} = live(conn, ~p"/")
-    assert html =~ "Hotspots"
+    assert html =~ "Controls"
+    assert html =~ "Top hotspots"
     assert html =~ "Path filter"
     assert html =~ ~s(phx-hook="CirclePack")
   end
