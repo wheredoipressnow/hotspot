@@ -1,6 +1,6 @@
 defmodule Hotspot.StorageTest do
   @moduledoc """
-  Exercises the storage lifecycle against the real fixture dir. Not async — it
+  Exercises the storage lifecycle against the real fixture dir. Not async: it
   opens/closes the singleton Repo pool, so it must not overlap analysis_test.
   Each test restores the globally-open fixture so the rest of the suite is unaffected.
   """

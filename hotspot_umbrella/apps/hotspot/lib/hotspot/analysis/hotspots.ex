@@ -2,7 +2,7 @@ defmodule Hotspot.Analysis.Hotspots do
   @moduledoc """
   Ranked "top hotspots" overview backing the list panel. Aggregates the same
   per-change facts as `Hotspot.Analysis.Tree` but at the requested `scope`
-  (`"files"` — full paths; `"folders"` — every ancestor directory) and returns
+  (`"files"` for full paths, `"folders"` for every ancestor directory) and returns
   the top N by `metric`. Distinct author counts are computed from raw author
   emails so folder rollups stay correct (they are not additive across files).
 
@@ -11,7 +11,7 @@ defmodule Hotspot.Analysis.Hotspots do
   """
   import Ecto.Query
   alias Hotspot.Repo
-  alias Hotspot.Analysis.Renames
+  alias Hotspot.Analysis.{Renames, Tracked}
   alias Hotspot.Storage.{Commit, FileChange}
 
   @type params :: %{
@@ -69,7 +69,10 @@ defmodule Hotspot.Analysis.Hotspots do
       rows
     else
       rename = Renames.map()
-      Enum.map(rows, &%{&1 | path: Renames.resolve(rename, &1.path)})
+
+      rows
+      |> Enum.map(&%{&1 | path: Renames.resolve(rename, &1.path)})
+      |> Tracked.filter()
     end
   end
 

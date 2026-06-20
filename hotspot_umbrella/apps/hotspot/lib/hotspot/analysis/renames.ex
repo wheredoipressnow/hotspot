@@ -2,8 +2,8 @@ defmodule Hotspot.Analysis.Renames do
   @moduledoc """
   Resolves `rename_edge` chains so a file that moved (`old_path` → `new_path`,
   possibly several hops) can be folded onto its terminal path. Used by the tree
-  and top-hotspots aggregations when `include_removed: false` (HANDOFF §5 "follow
-  renames"). A small cycle guard keeps pathological data from looping forever.
+  and top-hotspots aggregations when `include_removed: false`. A small cycle guard
+  keeps pathological data from looping forever.
   """
   import Ecto.Query
   alias Hotspot.Repo

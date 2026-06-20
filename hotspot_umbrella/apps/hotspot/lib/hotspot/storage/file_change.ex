@@ -1,6 +1,6 @@
 defmodule Hotspot.Storage.FileChange do
   @moduledoc """
-  Read-only mirror of the runner's `file_change` table — one row per (commit, file
+  Read-only mirror of the runner's `file_change` table, one row per (commit, file
   touched). `added`/`deleted` are nil for binary files. No natural primary key.
   """
   use Ecto.Schema

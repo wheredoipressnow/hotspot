@@ -1,11 +1,8 @@
 defmodule Hotspot.Analysis do
   @moduledoc """
-  The single public surface of the analytics app. "What is a hotspot" lives here
-  and nowhere else (HANDOFF §2): the web app calls this context only — never the
+  The single public surface of the analytics app. The definition of a hotspot
+  lives here and nowhere else: the web app calls this context only, never the
   Repo, schemas, or raw SQL directly.
-
-  Currently a thin read path proving the read-only Ecto wiring; the four metrics
-  and the change-coupling query land here next.
 
   No db is loaded at boot (see `Hotspot.Storage`). Every read here first checks
   that a db is open, returning `{:error, :no_database}` rather than crashing on a
@@ -32,7 +29,16 @@ defmodule Hotspot.Analysis do
   end
 
   @doc """
-  Summary counts for the extracted repo — smoke test of the read path.
+  Whether the open db can exclude removed (deleted) files, i.e. whether it carries a
+  current `tracked_file` snapshot. `false` when no db is open or on an older db without
+  that snapshot, in which case `include_removed: false` only folds renames.
+  """
+  def removed_filter_available? do
+    with_database(&Hotspot.Analysis.Tracked.available?/0) == true
+  end
+
+  @doc """
+  Summary counts for the extracted repo.
   Returns `{:error, :no_database}` when no db is open.
   """
   def repo_stats do

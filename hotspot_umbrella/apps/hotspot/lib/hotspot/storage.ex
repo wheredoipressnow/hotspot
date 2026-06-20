@@ -3,8 +3,8 @@ defmodule Hotspot.Storage do
   Owns the storage *lifecycle*: which runner-produced `.db` files are available,
   which one is currently open, and the `Hotspot.Repo` connection pool over it.
 
-  The db is no longer wired in at boot — the app starts with nothing open and a
-  file is selected at runtime, like DB Browser for SQLite's "Open Database".
+  No db is wired in at boot: the app starts with nothing open and a file is
+  selected at runtime, like DB Browser for SQLite's "Open Database".
   This GenServer is a lifecycle manager, not a query proxy: reads still go through
   Ecto (`Hotspot.Analysis` -> `Hotspot.Repo`); it just starts/stops the pool under
   `Hotspot.RepoSupervisor` and tracks the selection.

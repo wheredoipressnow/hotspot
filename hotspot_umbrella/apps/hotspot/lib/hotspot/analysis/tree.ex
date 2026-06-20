@@ -1,27 +1,27 @@
 defmodule Hotspot.Analysis.Tree do
   @moduledoc """
-  Builds the nested directory tree for the circle-packing visualization
-  (HANDOFF §5 `tree_for_visualization`). SQL reduces to per-file aggregates;
-  Elixir nests them by path. Owned by the analytics app — never called from web
-  except through `Hotspot.Analysis`.
+  Builds the nested directory tree for the circle-packing visualization. SQL
+  reduces to per-file aggregates; Elixir nests them by path. Owned by the
+  analytics app, never called from web except through `Hotspot.Analysis`.
 
   ## Removed / renamed files (`include_removed`)
 
   By default every path ever touched in history is included (`include_removed:
-  true`) — including files deleted or renamed away, each carrying full historical
+  true`), including files deleted or renamed away, each carrying full historical
   churn. With `include_removed: false` the aggregates are recomputed after
   *folding renames*: each `file_change` path is remapped to the terminal path of
   its `rename_edge` chain, so a refactored file counts once under its final name
-  and its obsolete path disappears (3a).
+  and its obsolete path disappears.
 
-  Truly *deleted* files (gone from HEAD, never renamed) cannot be excluded yet:
-  the runner-produced db carries no working-tree file list, so there is no signal
-  for "still exists" (3b — blocked on a runner change). Until then
-  `include_removed: false` only collapses renames.
+  Truly *deleted* files (gone from HEAD, never renamed) are also excluded when the
+  db carries a `tracked_file` snapshot: after folding, rows whose resolved path is
+  no longer present at the extracted ref are dropped (`Hotspot.Analysis.Tracked`).
+  On older databases without that snapshot, `include_removed: false` falls back to
+  only collapsing renames.
   """
   import Ecto.Query
   alias Hotspot.Repo
-  alias Hotspot.Analysis.Renames
+  alias Hotspot.Analysis.{Renames, Tracked}
   alias Hotspot.Storage.{Commit, FileChange}
 
   @type params :: %{
@@ -104,6 +104,7 @@ defmodule Hotspot.Analysis.Tree do
         author_count: rows |> Enum.map(& &1.author) |> Enum.uniq() |> length()
       }
     end)
+    |> Tracked.filter()
     |> filter_path_list(path_filter)
   end
 

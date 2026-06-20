@@ -1,9 +1,9 @@
 import Config
 
-# Read-only Ecto in tests too: the schema is owned by the git runner, so there is
-# no Sandbox/ownership — tests run against a real runner-produced fixture db.
-# `:db_dir` holds the runner's dbs; the test helpers open one via Hotspot.Storage.
-config :hotspot, :db_dir, System.get_env("HOTSPOT_DB_DIR") || Path.expand("../../dbs", __DIR__)
+config :hotspot,
+       :db_dir,
+       System.get_env("HOTSPOT_DB_DIR") || System.get_env("$XDG_DATA_HOME/hotspot") ||
+         Path.expand(".", __DIR__)
 
 # We don't run a server during test. If one is required,
 # you can enable the server option below.

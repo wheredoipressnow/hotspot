@@ -2,8 +2,7 @@ defmodule HotspotWeb.HotspotLive do
   @moduledoc """
   Circle-packing view of repo hotspots. Owns the visualization parameters (metric,
   path filter, include-removed, labels) and pushes the nested tree to the
-  `CirclePack` JS hook. Reads only through `Hotspot.Analysis` — never the Repo
-  (HANDOFF §2).
+  `CirclePack` JS hook. Reads only through `Hotspot.Analysis`, never the Repo.
 
   Layout is a full-height row: a docked **Controls** panel (db selection + options)
   on the left, the chart filling the middle, and a docked **Top hotspots** panel on
@@ -24,11 +23,15 @@ defmodule HotspotWeb.HotspotLive do
   def mount(_params, _session, socket) do
     if connected?(socket), do: Phoenix.PubSub.subscribe(Hotspot.PubSub, Storage.topic())
 
+    available = Analysis.removed_filter_available?()
+
     {:ok,
      assign(socket,
        metric: "churn",
        path_filter: "",
-       include_removed: true,
+       # Default to excluding removed files when the db can, else include all.
+       include_removed: not available,
+       removed_filter_available: available,
        show_labels: false,
        metrics: @metrics,
        hotspots_scope: "files",
@@ -47,11 +50,19 @@ defmodule HotspotWeb.HotspotLive do
   end
 
   def handle_event("update", params, socket) do
+    # The removed-files toggle only has effect when the db supports it; on a db that
+    # lacks the snapshot the control is disabled and we force include-all regardless
+    # of the submitted value.
+    include_removed =
+      if socket.assigns.removed_filter_available,
+        do: params["include_removed"] == "true",
+        else: true
+
     socket
     |> assign(
       metric: params["metric"] || socket.assigns.metric,
       path_filter: params["path_filter"] || socket.assigns.path_filter,
-      include_removed: params["include_removed"] == "true",
+      include_removed: include_removed,
       show_labels: params["show_labels"] == "true"
     )
     |> refresh()
@@ -84,7 +95,18 @@ defmodule HotspotWeb.HotspotLive do
   @impl true
   def handle_info({:storage_changed, current}, socket) do
     # Path filter is repo-specific, so clear it on a db switch; other prefs persist.
-    socket = assign(socket, current: current, dbs: Storage.list(), path_filter: "")
+    # Removed-filter availability is per-db, so recompute it and its default.
+    available = Analysis.removed_filter_available?()
+
+    socket =
+      assign(socket,
+        current: current,
+        dbs: Storage.list(),
+        path_filter: "",
+        removed_filter_available: available,
+        include_removed: not available
+      )
+
     {:noreply, if(current, do: refresh(socket), else: assign(socket, hotspots: []))}
   end
 
@@ -148,6 +170,7 @@ defmodule HotspotWeb.HotspotLive do
           metrics={@metrics}
           path_filter={@path_filter}
           include_removed={@include_removed}
+          removed_filter_available={@removed_filter_available}
           show_labels={@show_labels}
         />
       </.panel>
@@ -170,7 +193,12 @@ defmodule HotspotWeb.HotspotLive do
       </div>
 
       <.panel open={@hotspots_open} side="right" title="Top hotspots" toggle="toggle_hotspots">
-        <.top_hotspots current={@current} scope={@hotspots_scope} hotspots={@hotspots} metric={@metric} />
+        <.top_hotspots
+          current={@current}
+          scope={@hotspots_scope}
+          hotspots={@hotspots}
+          metric={@metric}
+        />
       </.panel>
     </div>
     """
@@ -232,6 +260,7 @@ defmodule HotspotWeb.HotspotLive do
   attr(:metrics, :list, required: true)
   attr(:path_filter, :string, required: true)
   attr(:include_removed, :boolean, required: true)
+  attr(:removed_filter_available, :boolean, required: true)
   attr(:show_labels, :boolean, required: true)
 
   defp controls(assigns) do
@@ -250,7 +279,8 @@ defmodule HotspotWeb.HotspotLive do
 
     <p :if={@dbs == []} class="text-xs opacity-70">
       No databases found. Point <code class="font-mono">HOTSPOT_DB_DIR</code>
-      at a folder of runner-produced <code class="font-mono">.db</code> files.
+      at a folder of runner-produced <code class="font-mono">.db</code>
+      files.
     </p>
 
     <form id="options-form" phx-change="update" class="space-y-3">
@@ -275,16 +305,25 @@ defmodule HotspotWeb.HotspotLive do
         />
       </label>
 
-      <label class="flex items-center gap-2 cursor-pointer">
+      <label
+        class={["flex items-center gap-2", @removed_filter_available && "cursor-pointer"]}
+        title={
+          !@removed_filter_available &&
+            "Needs runner support (tracked_file snapshot); re-extract with the updated runner."
+        }
+      >
         <input type="hidden" name="include_removed" value="false" />
         <input
           type="checkbox"
           name="include_removed"
           value="true"
           checked={@include_removed}
+          disabled={!@removed_filter_available}
           class="checkbox checkbox-sm"
         />
-        <span class="text-sm">Include removed / renamed files</span>
+        <span class={["text-sm", !@removed_filter_available && "opacity-50"]}>
+          Include removed / renamed files
+        </span>
       </label>
 
       <label class="flex items-center gap-2 cursor-pointer">

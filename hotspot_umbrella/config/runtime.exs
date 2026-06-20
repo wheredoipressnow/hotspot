@@ -10,10 +10,9 @@ import Config
 config :hotspot_web, HotspotWeb.Endpoint,
   http: [port: String.to_integer(System.get_env("PORT", "4000"))]
 
-# Directory of runner-produced `.db` files. No db is opened at boot; the user
-# picks one at runtime (see `Hotspot.Storage`). Honored in all environments —
-# dev/test fall back to the repo's `dbs/` folder when this is unset.
-if dir = System.get_env("HOTSPOT_DB_DIR") do
+if dir =
+     System.get_env("HOTSPOT_DB_DIR") || System.get_env("$XDG_DATA_HOME/hotspot") ||
+       Path.expand(".", __DIR__) do
   config :hotspot, :db_dir, dir
 end
 

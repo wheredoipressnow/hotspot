@@ -1,9 +1,5 @@
 import Config
 
-# Read-only against the SQLite dbs produced by the (TypeScript) git runner. The
-# schema is owned by the runner — this app never writes or migrates it. No db is
-# opened at boot: `Hotspot.Storage` lists the `.db` files in `:db_dir` and opens
-# one on demand (env HOTSPOT_DB_DIR, default the repo's `dbs/` folder).
 config :hotspot,
        :db_dir,
        System.get_env("HOTSPOT_DB_DIR") || System.get_env("$XDG_DATA_HOME/hotspot") ||
