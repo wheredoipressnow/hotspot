@@ -31,6 +31,8 @@ defmodule Hotspot.AnalysisTest do
         assert is_binary(leaf.path)
         assert is_integer(leaf.churn) and leaf.churn >= 0
         assert is_integer(leaf.author_count) and leaf.author_count >= 1
+        assert is_integer(leaf.recency_churn) and leaf.recency_churn >= 0
+        assert is_integer(leaf.last_changed) and leaf.last_changed > 0
       end
     end
 

@@ -11,7 +11,10 @@ import Config
 
 # Configure Mix tasks and generators
 config :hotspot,
-  ecto_repos: [Hotspot.Repo]
+  ecto_repos: [Hotspot.Repo],
+  # Half-life (days) for recency-weighted churn: a change this old counts half as
+  # much as one made now. See Hotspot.Analysis.Recency.
+  recency_half_life_days: 90
 
 config :hotspot_web,
   ecto_repos: [Hotspot.Repo],

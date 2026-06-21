@@ -15,6 +15,16 @@ function colorFor(value, min, max) {
   return `rgb(${c[0]}, ${c[1]}, ${c[2]})`
 }
 
+// Compact "time ago" label for an epoch-second timestamp, e.g. "3d", "5mo", "2y".
+function relativeAge(epoch) {
+  if (!epoch) return "—"
+  const days = Math.floor(Date.now() / 1000 - epoch) / 86400
+  if (days < 1) return "today"
+  if (days < 30) return `${Math.floor(days)}d`
+  if (days < 365) return `${Math.floor(days / 30)}mo`
+  return `${Math.floor(days / 365)}y`
+}
+
 // Container/label chrome must contrast with the daisyUI base background, which
 // flips with the theme. Leaf circles keep the ramp above.
 function themeChrome() {
@@ -239,7 +249,9 @@ export const CirclePack = {
     } else {
       const churn = d.data.churn ?? 0
       const authors = d.data.author_count ?? 0
-      html = `<strong>${d.data.path}</strong><br>churn ${churn} · authors ${authors}`
+      const recency = d.data.recency_churn ?? 0
+      const changed = relativeAge(d.data.last_changed)
+      html = `<strong>${d.data.path}</strong><br>churn ${churn} · authors ${authors}<br>recent ${recency} · changed ${changed}`
     }
     this.tooltip.innerHTML = html
     this.tooltip.style.left = `${event.clientX + 12}px`

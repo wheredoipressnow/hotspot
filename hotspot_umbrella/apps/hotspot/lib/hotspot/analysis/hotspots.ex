@@ -3,19 +3,23 @@ defmodule Hotspot.Analysis.Hotspots do
   Ranked "top hotspots" overview backing the list panel. Aggregates the same
   per-change facts as `Hotspot.Analysis.Tree` but at the requested `scope`
   (`"files"` for full paths, `"folders"` for every ancestor directory) and returns
-  the top N by `metric`. Distinct author counts are computed from raw author
+  the top N by `sort`. Distinct author counts are computed from raw author
   emails so folder rollups stay correct (they are not additive across files).
+  Recency-weighted churn and last-changed time are scored from `committed_at` via
+  `Hotspot.Analysis.Recency`.
 
   Respects `include_removed` (folds renames when false, see
   `Hotspot.Analysis.Renames`) and `include_merges`.
   """
   import Ecto.Query
   alias Hotspot.Repo
-  alias Hotspot.Analysis.{Renames, Tracked}
+  alias Hotspot.Analysis.{Recency, Renames, Tracked}
   alias Hotspot.Storage.{Commit, FileChange}
 
+  @sorts ~w(churn author_count recency_churn last_changed)
+
   @type params :: %{
-          optional(:metric) => String.t(),
+          optional(:sort) => String.t(),
           optional(:scope) => String.t(),
           optional(:limit) => pos_integer,
           optional(:path_filter) => String.t() | nil,
@@ -24,33 +28,32 @@ defmodule Hotspot.Analysis.Hotspots do
         }
 
   @doc """
-  Returns `[%{path, churn, author_count}]` sorted by `metric` descending. Options:
-  `metric` (`"churn"` | `"author_count"`), `scope` (`"files"` | `"folders"`),
-  `limit` (default 25).
+  Returns `[%{path, churn, author_count, recency_churn, last_changed}]` sorted by
+  `sort` descending. Options: `sort` (`"churn"` | `"author_count"` |
+  `"recency_churn"` | `"last_changed"`, default `"churn"`), `scope` (`"files"` |
+  `"folders"`), `limit` (default 25).
   """
   @spec top(params) :: [map]
   def top(params \\ %{}) do
-    metric = if Map.get(params, :metric) == "author_count", do: :author_count, else: :churn
+    sort = sort_key(Map.get(params, :sort))
     scope = if Map.get(params, :scope) == "folders", do: :folders, else: :files
     limit = Map.get(params, :limit, 25)
+    opts = [now: Recency.now(), half_life: Recency.half_life_seconds()]
 
     params
     |> raw_rows()
     |> filter_path(Map.get(params, :path_filter))
     |> by_keys(scope)
-    |> Enum.map(fn {key, rows} ->
-      %{
-        path: key,
-        churn: rows |> Enum.map(& &1.churn) |> Enum.sum(),
-        author_count: rows |> Enum.map(& &1.author) |> Enum.uniq() |> length()
-      }
-    end)
-    |> Enum.sort_by(&Map.fetch!(&1, metric), :desc)
+    |> Enum.map(fn {key, rows} -> Map.put(Recency.metrics_for(rows, opts), :path, key) end)
+    |> Enum.sort_by(&Map.fetch!(&1, sort), :desc)
     |> Enum.take(limit)
   end
 
-  # Per-change rows `%{path, churn, author}`, paths folded onto rename terminals
-  # when include_removed is false.
+  defp sort_key(sort) when sort in @sorts, do: String.to_existing_atom(sort)
+  defp sort_key(_), do: :churn
+
+  # Per-change rows `%{path, churn, author, committed_at}`, paths folded onto
+  # rename terminals when include_removed is false.
   defp raw_rows(params) do
     include_merges = Map.get(params, :include_merges, false)
     include_removed = Map.get(params, :include_removed, true)
@@ -60,7 +63,12 @@ defmodule Hotspot.Analysis.Hotspots do
         join: c in Commit,
         on: c.sha == f.commit_sha,
         where: not is_nil(f.added),
-        select: %{path: f.path, churn: f.added + f.deleted, author: c.author_email}
+        select: %{
+          path: f.path,
+          churn: f.added + f.deleted,
+          author: c.author_email,
+          committed_at: c.committed_at
+        }
       )
       |> maybe_exclude_merges(include_merges)
       |> Repo.all()

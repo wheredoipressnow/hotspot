@@ -16,7 +16,19 @@ defmodule HotspotWeb.HotspotLive do
 
   alias Hotspot.{Analysis, Storage}
 
-  @metrics [{"Churn", "churn"}, {"Author count", "author_count"}]
+  @metrics [
+    {"Churn", "churn"},
+    {"Author count", "author_count"},
+    {"Recency-weighted churn", "recency_churn"}
+  ]
+  # Sort keys for the Top hotspots list. A superset of the size metrics: last-changed
+  # is a timestamp, meaningful as a list order but not as a circle size.
+  @sorts [
+    {"Churn", "churn"},
+    {"Author count", "author_count"},
+    {"Recency-weighted churn", "recency_churn"},
+    {"Last changed", "last_changed"}
+  ]
   @top_limit 25
 
   @impl true
@@ -38,7 +50,9 @@ defmodule HotspotWeb.HotspotLive do
        removed_filter_available: available,
        show_labels: false,
        metrics: @metrics,
+       sorts: @sorts,
        hotspots_scope: "files",
+       hotspots_sort: "churn",
        hotspots: [],
        prefs_open: true,
        hotspots_open: true,
@@ -81,6 +95,10 @@ defmodule HotspotWeb.HotspotLive do
 
   def handle_event("set_scope", %{"scope" => scope}, socket) do
     {:noreply, socket |> assign(hotspots_scope: scope) |> assign_hotspots()}
+  end
+
+  def handle_event("set_sort", %{"sort" => sort}, socket) do
+    {:noreply, socket |> assign(hotspots_sort: sort) |> assign_hotspots()}
   end
 
   def handle_event("open_db", %{"db" => ""}, socket), do: {:noreply, socket}
@@ -223,7 +241,7 @@ defmodule HotspotWeb.HotspotLive do
 
   defp assign_hotspots(socket) do
     params = %{
-      metric: socket.assigns.metric,
+      sort: socket.assigns.hotspots_sort,
       scope: socket.assigns.hotspots_scope,
       include_removed: socket.assigns.include_removed,
       path_filter: socket.assigns.path_filter,
@@ -285,8 +303,9 @@ defmodule HotspotWeb.HotspotLive do
         <.top_hotspots
           current={@current}
           scope={@hotspots_scope}
+          sort={@hotspots_sort}
+          sorts={@sorts}
           hotspots={@hotspots}
-          metric={@metric}
         />
       </.panel>
     </div>
@@ -444,8 +463,9 @@ defmodule HotspotWeb.HotspotLive do
 
   attr(:current, :string, default: nil)
   attr(:scope, :string, required: true)
+  attr(:sort, :string, required: true)
+  attr(:sorts, :list, required: true)
   attr(:hotspots, :list, required: true)
-  attr(:metric, :string, required: true)
 
   defp top_hotspots(assigns) do
     ~H"""
@@ -458,6 +478,17 @@ defmodule HotspotWeb.HotspotLive do
           <select name="scope" class="select select-bordered select-sm">
             <option value="files" selected={@scope == "files"}>Files</option>
             <option value="folders" selected={@scope == "folders"}>Folders</option>
+          </select>
+        </label>
+      </form>
+
+      <form id="sort-form" phx-change="set_sort" class="mb-3">
+        <label class="flex flex-col gap-1">
+          <span class="text-sm">Sort by</span>
+          <select name="sort" class="select select-bordered select-sm">
+            <option :for={{label, value} <- @sorts} value={value} selected={value == @sort}>
+              {label}
+            </option>
           </select>
         </label>
       </form>
@@ -476,7 +507,7 @@ defmodule HotspotWeb.HotspotLive do
             <span class="text-xs opacity-50 w-5 shrink-0">{i}</span>
             <span class="font-mono text-xs truncate grow">{h.path}</span>
             <span class="text-xs opacity-70 shrink-0">
-              {metric_value(h, @metric)}
+              {sort_value(h, @sort)}
             </span>
           </button>
         </li>
@@ -485,8 +516,25 @@ defmodule HotspotWeb.HotspotLive do
     """
   end
 
-  defp metric_value(h, "author_count"), do: "#{h.author_count}a"
-  defp metric_value(h, _churn), do: h.churn
+  # The value shown per row is the one being sorted on.
+  defp sort_value(h, "author_count"), do: "#{h.author_count}a"
+  defp sort_value(h, "recency_churn"), do: h.recency_churn
+  defp sort_value(h, "last_changed"), do: relative_age(h.last_changed)
+  defp sort_value(h, _churn), do: h.churn
+
+  # Compact "time ago" label for an epoch second, e.g. "3d", "5mo", "2y".
+  defp relative_age(epoch) when is_integer(epoch) and epoch > 0 do
+    days = div(System.os_time(:second) - epoch, 86_400)
+
+    cond do
+      days <= 0 -> "today"
+      days < 30 -> "#{days}d"
+      days < 365 -> "#{div(days, 30)}mo"
+      true -> "#{div(days, 365)}y"
+    end
+  end
+
+  defp relative_age(_), do: "—"
 
   # --- Extraction banner -----------------------------------------------------
 

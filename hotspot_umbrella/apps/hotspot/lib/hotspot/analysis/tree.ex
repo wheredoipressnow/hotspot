@@ -21,7 +21,7 @@ defmodule Hotspot.Analysis.Tree do
   """
   import Ecto.Query
   alias Hotspot.Repo
-  alias Hotspot.Analysis.{Renames, Tracked}
+  alias Hotspot.Analysis.{Recency, Renames, Tracked}
   alias Hotspot.Storage.{Commit, FileChange}
 
   @type params :: %{
@@ -31,12 +31,13 @@ defmodule Hotspot.Analysis.Tree do
         }
 
   @doc """
-  Returns a JSON-able nested tree. Leaves carry both metric values so the client
+  Returns a JSON-able nested tree. Leaves carry every metric value so the client
   can switch the size encoding without a server round-trip:
 
       %{name: "root", children: [
         %{name: "lib", children: [
-          %{name: "app.ex", path: "lib/app.ex", churn: 412, author_count: 3}]}]}
+          %{name: "app.ex", path: "lib/app.ex", churn: 412, author_count: 3,
+            recency_churn: 88, last_changed: 1_718_900_000}]}]}
   """
   @spec tree_for_visualization(params) :: map
   def tree_for_visualization(params \\ %{}) do
@@ -45,79 +46,47 @@ defmodule Hotspot.Analysis.Tree do
     |> build_tree()
   end
 
-  # Per-file aggregates of `%{path, churn, author_count}`. When include_removed is
-  # true (default) we group in SQL over every historical path. When false we fold
-  # renames first, which needs row-level remapping, so we aggregate in Elixir.
+  # Per-file aggregates of `%{path, churn, author_count, recency_churn, last_changed}`.
+  # Recency weighting requires per-change rows scored in code (see
+  # `Hotspot.Analysis.Recency`), so we aggregate in Elixir uniformly. When
+  # include_removed is false we additionally fold renames onto their terminal path
+  # before grouping and drop paths gone from HEAD.
   defp aggregate(params) do
     include_merges = Map.get(params, :include_merges, false)
     include_removed = Map.get(params, :include_removed, true)
     path_filter = Map.get(params, :path_filter)
 
-    if include_removed do
-      aggregate_all(include_merges, path_filter)
-    else
-      aggregate_folded(include_merges, path_filter)
-    end
+    rename = if include_removed, do: %{}, else: Renames.map()
+    opts = [now: Recency.now(), half_life: Recency.half_life_seconds()]
+
+    include_merges
+    |> change_rows()
+    |> Enum.group_by(&Renames.resolve(rename, &1.path))
+    |> Enum.map(fn {path, rows} -> Map.put(Recency.metrics_for(rows, opts), :path, path) end)
+    |> then(if include_removed, do: & &1, else: &Tracked.filter/1)
+    |> filter_path_list(path_filter)
   end
 
-  # One grouped query joining file_change -> commit_info. Binary rows (added IS NULL)
-  # are excluded from churn. Merges excluded unless include_merges is true.
-  defp aggregate_all(include_merges, path_filter) do
+  # Per-change rows `%{path, churn, author, committed_at}`. Binary rows
+  # (added IS NULL) are excluded from churn; merges excluded unless include_merges.
+  defp change_rows(include_merges) do
     from(f in FileChange,
       join: c in Commit,
       on: c.sha == f.commit_sha,
       where: not is_nil(f.added),
-      group_by: f.path,
       select: %{
         path: f.path,
-        churn: sum(f.added + f.deleted),
-        author_count: count(c.author_email, :distinct)
+        churn: f.added + f.deleted,
+        author: c.author_email,
+        committed_at: c.committed_at
       }
     )
     |> maybe_exclude_merges(include_merges)
-    |> maybe_filter_path(path_filter)
     |> Repo.all()
-  end
-
-  # Fold renames: pull per-change rows, remap each path to its terminal rename
-  # target, then aggregate in Elixir so distinct author counts stay correct (they
-  # are not additive across merged paths).
-  defp aggregate_folded(include_merges, path_filter) do
-    rename = Renames.map()
-
-    base =
-      from(f in FileChange,
-        join: c in Commit,
-        on: c.sha == f.commit_sha,
-        where: not is_nil(f.added),
-        select: %{path: f.path, churn: f.added + f.deleted, author: c.author_email}
-      )
-
-    base
-    |> maybe_exclude_merges(include_merges)
-    |> Repo.all()
-    |> Enum.group_by(&Renames.resolve(rename, &1.path))
-    |> Enum.map(fn {path, rows} ->
-      %{
-        path: path,
-        churn: rows |> Enum.map(& &1.churn) |> Enum.sum(),
-        author_count: rows |> Enum.map(& &1.author) |> Enum.uniq() |> length()
-      }
-    end)
-    |> Tracked.filter()
-    |> filter_path_list(path_filter)
   end
 
   defp maybe_exclude_merges(query, true), do: query
   defp maybe_exclude_merges(query, false), do: from([_f, c] in query, where: c.parent_count < 2)
-
-  defp maybe_filter_path(query, nil), do: query
-  defp maybe_filter_path(query, ""), do: query
-
-  defp maybe_filter_path(query, prefix) do
-    like = prefix <> "%"
-    from([f, _c] in query, where: like(f.path, ^like))
-  end
 
   defp filter_path_list(rows, prefix) when prefix in [nil, ""], do: rows
 
@@ -150,7 +119,9 @@ defmodule Hotspot.Analysis.Tree do
           name: name,
           path: leaf.path,
           churn: leaf.churn || 0,
-          author_count: leaf.author_count || 0
+          author_count: leaf.author_count || 0,
+          recency_churn: leaf.recency_churn || 0,
+          last_changed: leaf.last_changed || 0
         }
       else
         %{name: name, children: to_children(children)}
