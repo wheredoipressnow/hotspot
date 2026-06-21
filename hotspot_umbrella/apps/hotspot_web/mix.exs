@@ -58,6 +58,7 @@ defmodule HotspotWeb.MixProject do
       {:telemetry_poller, "~> 1.0"},
       {:gettext, "~> 1.0"},
       {:hotspot, in_umbrella: true},
+      {:hotspot_runner, in_umbrella: true},
       {:jason, "~> 1.2"},
       {:bandit, "~> 1.5"}
     ]

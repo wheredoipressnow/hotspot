@@ -21,9 +21,13 @@ defmodule HotspotWeb.HotspotLive do
 
   @impl true
   def mount(_params, _session, socket) do
-    if connected?(socket), do: Phoenix.PubSub.subscribe(Hotspot.PubSub, Storage.topic())
+    if connected?(socket) do
+      Phoenix.PubSub.subscribe(Hotspot.PubSub, Storage.topic())
+      Phoenix.PubSub.subscribe(Hotspot.PubSub, HotspotRunner.Job.topic())
+    end
 
     available = Analysis.removed_filter_available?()
+    root = repo_root()
 
     {:ok,
      assign(socket,
@@ -39,7 +43,13 @@ defmodule HotspotWeb.HotspotLive do
        prefs_open: true,
        hotspots_open: true,
        dbs: Storage.list(),
-       current: Storage.current()
+       current: Storage.current(),
+       # Repository picker + background extraction.
+       picker_root: root,
+       picker_open: false,
+       picker_dir: root,
+       picker_entries: [],
+       extraction: nil
      )}
   end
 
@@ -80,6 +90,54 @@ defmodule HotspotWeb.HotspotLive do
     {:noreply, socket}
   end
 
+  # --- Repository picker (server-side directory browser) ---------------------
+  # A native browser folder dialog can't hand the server a real filesystem path,
+  # so we browse the server's filesystem here and pass the chosen absolute path
+  # to the runner.
+
+  def handle_event("open_picker", _params, socket) do
+    dir = socket.assigns.picker_root
+    {:noreply, assign(socket, picker_open: true, picker_dir: dir, picker_entries: list_dirs(dir))}
+  end
+
+  def handle_event("close_picker", _params, socket) do
+    {:noreply, assign(socket, picker_open: false)}
+  end
+
+  def handle_event("picker_nav", %{"path" => path}, socket) do
+    if within_root?(path, socket.assigns.picker_root) and File.dir?(path) do
+      dir = Path.expand(path)
+      {:noreply, assign(socket, picker_dir: dir, picker_entries: list_dirs(dir))}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  def handle_event("pick_repo", %{"path" => path}, socket) do
+    path = Path.expand(path)
+
+    cond do
+      not within_root?(path, socket.assigns.picker_root) ->
+        {:noreply, socket}
+
+      not File.dir?(Path.join(path, ".git")) ->
+        {:noreply, assign(socket, extraction: %{state: :error, reason: "Not a git repository"})}
+
+      true ->
+        HotspotRunner.Job.start(path, "HEAD")
+
+        {:noreply,
+         assign(socket,
+           picker_open: false,
+           extraction: %{state: :running, repo: path, commits: 0}
+         )}
+    end
+  end
+
+  def handle_event("dismiss_extraction", _params, socket) do
+    {:noreply, assign(socket, extraction: nil)}
+  end
+
   def handle_event("toggle_prefs", _params, socket) do
     {:noreply, update(socket, :prefs_open, &(!&1))}
   end
@@ -108,6 +166,29 @@ defmodule HotspotWeb.HotspotLive do
       )
 
     {:noreply, if(current, do: refresh(socket), else: assign(socket, hotspots: []))}
+  end
+
+  # Background extraction progress. On `:done` the runner has already opened the
+  # produced db, so a `:storage_changed` message refreshes the view; here we only
+  # track the banner state.
+  def handle_info({:extraction, :started, %{repo: repo}}, socket) do
+    {:noreply, assign(socket, extraction: %{state: :running, repo: repo, commits: 0})}
+  end
+
+  def handle_info({:extraction, :progress, %{commits: n}}, socket) do
+    prev = socket.assigns.extraction || %{state: :running, repo: nil}
+    {:noreply, assign(socket, extraction: %{prev | state: :running, commits: n})}
+  end
+
+  def handle_info({:extraction, :done, result}, socket) do
+    {:noreply,
+     assign(socket,
+       extraction: %{state: :done, repo: result.toplevel, commits: result.commits_written}
+     )}
+  end
+
+  def handle_info({:extraction, :error, reason}, socket) do
+    {:noreply, assign(socket, extraction: %{state: :error, reason: inspect(reason)})}
   end
 
   # Recompute both views: push the tree to the hook and assign the ranked list.
@@ -162,6 +243,14 @@ defmodule HotspotWeb.HotspotLive do
   def render(assigns) do
     ~H"""
     <div class="h-screen flex overflow-hidden">
+      <.extraction_banner :if={@extraction} extraction={@extraction} />
+      <.repo_picker
+        :if={@picker_open}
+        dir={@picker_dir}
+        root={@picker_root}
+        entries={@picker_entries}
+      />
+
       <.panel open={@prefs_open} side="left" title="Controls" toggle="toggle_prefs">
         <.controls
           dbs={@dbs}
@@ -277,9 +366,14 @@ defmodule HotspotWeb.HotspotLive do
       </label>
     </form>
 
+    <button type="button" phx-click="open_picker" class="btn btn-sm btn-primary w-full">
+      <.icon name="hero-folder-open" class="size-4" /> Open repository…
+    </button>
+
     <p :if={@dbs == []} class="text-xs opacity-70">
-      No databases found. Point <code class="font-mono">HOTSPOT_DB_DIR</code>
-      at a folder of runner-produced <code class="font-mono">.db</code>
+      No databases yet. <span class="font-semibold">Open a repository</span>
+      above to extract one, or point <code class="font-mono">HOTSPOT_DB_DIR</code>
+      at a folder of <code class="font-mono">.db</code>
       files.
     </p>
 
@@ -393,4 +487,152 @@ defmodule HotspotWeb.HotspotLive do
 
   defp metric_value(h, "author_count"), do: "#{h.author_count}a"
   defp metric_value(h, _churn), do: h.churn
+
+  # --- Extraction banner -----------------------------------------------------
+
+  attr(:extraction, :map, required: true)
+
+  defp extraction_banner(assigns) do
+    ~H"""
+    <div class="absolute top-3 left-1/2 -translate-x-1/2 z-30 w-[28rem] max-w-[90vw]">
+      <div class={[
+        "alert shadow-lg flex items-center gap-3 py-2",
+        @extraction.state == :error && "alert-error",
+        @extraction.state == :done && "alert-success"
+      ]}>
+        <span :if={@extraction.state == :running} class="loading loading-spinner loading-sm" />
+        <div class="text-sm grow min-w-0">
+          <%= case @extraction.state do %>
+            <% :running -> %>
+              <span class="truncate">
+                Extracting <span class="font-mono">{Path.basename(@extraction.repo || "")}</span>…
+                <span :if={@extraction.commits > 0}>{@extraction.commits} commits</span>
+              </span>
+            <% :done -> %>
+              Extracted <span class="font-mono">{Path.basename(@extraction.repo || "")}</span>
+              ({@extraction.commits} commits).
+            <% :error -> %>
+              Extraction failed: {@extraction.reason}
+          <% end %>
+        </div>
+        <button
+          :if={@extraction.state != :running}
+          type="button"
+          phx-click="dismiss_extraction"
+          class="btn btn-xs btn-ghost"
+        >
+          <.icon name="hero-x-mark" class="size-4" />
+        </button>
+      </div>
+    </div>
+    """
+  end
+
+  # --- Repository picker (server-side directory browser) ---------------------
+
+  attr(:dir, :string, required: true)
+  attr(:root, :string, required: true)
+  attr(:entries, :list, required: true)
+
+  defp repo_picker(assigns) do
+    ~H"""
+    <div
+      class="fixed inset-0 z-40 flex items-center justify-center bg-black/40"
+      phx-click="close_picker"
+    >
+      <div
+        class="bg-base-100 rounded-lg shadow-xl w-[34rem] max-w-[92vw] max-h-[80vh] flex flex-col"
+        phx-click-away="close_picker"
+        onclick="event.stopPropagation()"
+      >
+        <div class="flex items-center justify-between px-4 py-3 border-b border-base-300">
+          <span class="font-semibold">Open repository</span>
+          <button type="button" phx-click="close_picker" class="btn btn-xs btn-ghost">
+            <.icon name="hero-x-mark" class="size-4" />
+          </button>
+        </div>
+
+        <div class="px-4 py-2 border-b border-base-300 flex items-center gap-2 text-xs">
+          <button
+            type="button"
+            phx-click="picker_nav"
+            phx-value-path={Path.dirname(@dir)}
+            disabled={@dir == @root}
+            class="btn btn-xs btn-ghost"
+            title="Up"
+          >
+            <.icon name="hero-arrow-up" class="size-4" />
+          </button>
+          <span class="font-mono truncate opacity-70">{@dir}</span>
+        </div>
+
+        <ul class="overflow-y-auto grow p-2 space-y-0.5">
+          <li :if={@entries == []} class="text-sm opacity-60 px-2 py-1">No subdirectories.</li>
+          <li :for={e <- @entries}>
+            <div class="flex items-center gap-1">
+              <button
+                type="button"
+                phx-click="picker_nav"
+                phx-value-path={e.path}
+                class="grow text-left flex items-center gap-2 px-2 py-1 rounded hover:bg-base-200 min-w-0"
+              >
+                <.icon
+                  name={if e.is_repo, do: "hero-folder-open", else: "hero-folder"}
+                  class={["size-4 shrink-0", e.is_repo && "text-primary"]}
+                />
+                <span class="font-mono text-sm truncate">{e.name}</span>
+              </button>
+              <button
+                :if={e.is_repo}
+                type="button"
+                phx-click="pick_repo"
+                phx-value-path={e.path}
+                class="btn btn-xs btn-primary shrink-0"
+              >
+                Extract
+              </button>
+            </div>
+          </li>
+        </ul>
+
+        <div class="px-4 py-2 border-t border-base-300 text-xs opacity-60">
+          Folders with a <code class="font-mono">.git</code>
+          are marked; click <span class="font-semibold">Extract</span>
+          to analyze.
+        </div>
+      </div>
+    </div>
+    """
+  end
+
+  # --- Directory-picker helpers ----------------------------------------------
+
+  # Root the picker is confined to (no navigating above it). Defaults to $HOME.
+  defp repo_root do
+    Application.get_env(:hotspot_web, :repo_root) || System.user_home!()
+  end
+
+  defp within_root?(path, root) do
+    path = Path.expand(path)
+    path == root or String.starts_with?(path <> "/", root <> "/")
+  end
+
+  # Immediate subdirectories of `dir` (skipping hidden ones), each flagged for
+  # whether it is itself a git repo.
+  defp list_dirs(dir) do
+    case File.ls(dir) do
+      {:ok, names} ->
+        names
+        |> Enum.reject(&String.starts_with?(&1, "."))
+        |> Enum.map(&Path.join(dir, &1))
+        |> Enum.filter(&File.dir?/1)
+        |> Enum.sort()
+        |> Enum.map(fn p ->
+          %{name: Path.basename(p), path: p, is_repo: File.dir?(Path.join(p, ".git"))}
+        end)
+
+      {:error, _} ->
+        []
+    end
+  end
 end

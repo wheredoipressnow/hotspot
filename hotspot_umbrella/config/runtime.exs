@@ -10,11 +10,12 @@ import Config
 config :hotspot_web, HotspotWeb.Endpoint,
   http: [port: String.to_integer(System.get_env("PORT", "4000"))]
 
-if dir =
-     System.get_env("HOTSPOT_DB_DIR") || System.get_env("$XDG_DATA_HOME/hotspot") ||
-       Path.expand(".", __DIR__) do
-  config :hotspot, :db_dir, dir
-end
+# Per-repo `.db` files written by `hotspot_runner` (`HotspotRunner.DbPath`) and
+# read by `Hotspot.Storage`. Both must resolve to the same directory.
+config :hotspot,
+       :db_dir,
+       System.get_env("HOTSPOT_DB_DIR") ||
+         Path.join(System.get_env("XDG_DATA_HOME") || Path.expand("~/.local/share"), "hotspot")
 
 if config_env() == :prod do
   # The secret key base is used to sign/encrypt cookies and other secrets.
