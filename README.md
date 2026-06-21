@@ -29,3 +29,7 @@ mix hotspot.extract [REPO_PATH]
 ```
 
 Run `mix help hotspot.extract` for its options.
+
+Databases are written one per repository under `HOTSPOT_DB_DIR`. When that
+variable is unset, the location defaults to `$XDG_DATA_HOME/hotspot`, or
+`~/.local/share/hotspot` when `XDG_DATA_HOME` is also unset.
