@@ -26,8 +26,18 @@ defmodule HotspotRunner.WriterTest do
       author_name: opts[:name] || "Ada",
       author_email: opts[:email] || "ada@example.com",
       parent_count: opts[:parents] || 1,
+      subject: opts[:subject] || "msg",
       files: opts[:files] || [],
       renames: opts[:renames] || []
+    }
+  end
+
+  defp tracked(path, opts \\ []) do
+    %{
+      path: path,
+      loc: opts[:loc],
+      indent_total: opts[:indent_total],
+      indent_max: opts[:indent_max]
     }
   end
 
@@ -84,13 +94,41 @@ defmodule HotspotRunner.WriterTest do
     assert Writer.get_meta(w, "ref") == "main"
   end
 
+  test "stores commit subject", %{writer: w} do
+    Writer.write_batch(w, [commit("aaa", subject: "fix: the bug")])
+
+    {:ok, stmt} = Exqlite.Sqlite3.prepare(w.conn, "SELECT subject FROM commit_info")
+    assert {:row, ["fix: the bug"]} = Exqlite.Sqlite3.step(w.conn, stmt)
+  end
+
   test "tracked snapshot is replaced wholesale and pins tracked_sha", %{writer: w} do
-    Writer.replace_tracked_files(w, ["a.txt", "b.txt"], "sha1")
+    Writer.replace_tracked_files(w, [tracked("a.txt"), tracked("b.txt")], "sha1")
     assert Writer.summary(w).tracked == 2
     assert Writer.get_meta(w, "tracked_sha") == "sha1"
 
-    Writer.replace_tracked_files(w, ["c.txt"], "sha2")
+    Writer.replace_tracked_files(w, [tracked("c.txt")], "sha2")
     assert Writer.summary(w).tracked == 1
     assert Writer.get_meta(w, "tracked_sha") == "sha2"
+  end
+
+  test "tracked snapshot stores loc/indent metrics, nil for binary", %{writer: w} do
+    Writer.replace_tracked_files(
+      w,
+      [tracked("a.ex", loc: 10, indent_total: 24, indent_max: 8), tracked("logo.bin")],
+      "sha1"
+    )
+
+    {:ok, stmt} =
+      Exqlite.Sqlite3.prepare(
+        w.conn,
+        "SELECT loc, indent_total, indent_max FROM tracked_file ORDER BY path"
+      )
+
+    assert {:row, [10, 24, 8]} = Exqlite.Sqlite3.step(w.conn, stmt)
+    assert {:row, [nil, nil, nil]} = Exqlite.Sqlite3.step(w.conn, stmt)
+  end
+
+  test "open records schema_version", %{writer: w} do
+    assert Writer.get_meta(w, "schema_version") == "2"
   end
 end

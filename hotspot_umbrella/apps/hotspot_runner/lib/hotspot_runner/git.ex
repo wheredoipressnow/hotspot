@@ -7,8 +7,9 @@ defmodule HotspotRunner.Git do
   (`rev-parse`, `ls-tree`) use `System.cmd/3`.
   """
 
-  # Leading NUL, then NUL-delimited SHA / author-epoch / name / email / parents.
-  @pretty "format:%x00%H%x00%at%x00%aN%x00%aE%x00%P"
+  # Leading NUL, then NUL-delimited SHA / author-epoch / name / email / parents /
+  # subject. Subject is the last header field (single line, no NUL of its own).
+  @pretty "format:%x00%H%x00%at%x00%aN%x00%aE%x00%P%x00%s"
   @common ["-z", "--numstat", "-M", "--no-color", "--pretty=" <> @pretty]
 
   # X-Ray single-file log: RS-prefixed header, US-delimited fields. RS (0x1e) /
@@ -66,6 +67,91 @@ defmodule HotspotRunner.Git do
       {:spawn_executable, git},
       [:binary, :exit_status, :use_stdio, {:args, args}, {:cd, to_charlist(cwd)}]
     )
+  end
+
+  @doc "Blob `{sha, path}` pairs tracked at `ref` (skips trees and submodules)."
+  @spec tree_blobs(String.t(), String.t()) :: [{String.t(), String.t()}]
+  def tree_blobs(cwd, ref) do
+    cwd
+    |> run(["-c", "core.quotePath=false", "ls-tree", "-r", "-z", ref])
+    |> :binary.split(<<0>>, [:global])
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.flat_map(fn entry ->
+      with [meta, path] <- String.split(entry, "\t", parts: 2),
+           [_mode, "blob", sha] <- String.split(meta, " ") do
+        [{sha, path}]
+      else
+        _ -> []
+      end
+    end)
+  end
+
+  @doc """
+  Read the given blob `shas` via one `git cat-file --batch` process, returning a
+  `%{sha => content}` map. Buffers the whole tree's content (a single snapshot,
+  not history), so it is for HEAD-tree scans, not the streaming history path.
+  """
+  @spec read_blobs(String.t(), [String.t()]) :: %{String.t() => binary}
+  def read_blobs(_cwd, []), do: %{}
+
+  def read_blobs(cwd, shas) do
+    git = System.find_executable("git") || raise "git executable not found on PATH"
+
+    port =
+      Port.open(
+        {:spawn_executable, git},
+        [
+          :binary,
+          :exit_status,
+          :use_stdio,
+          {:args, ["cat-file", "--batch"]},
+          {:cd, to_charlist(cwd)}
+        ]
+      )
+
+    Port.command(port, Enum.map_join(shas, "", &(&1 <> "\n")))
+    blobs = collect_blobs(port, length(shas), <<>>, %{})
+    Port.close(port)
+    blobs
+  end
+
+  # Parse the `--batch` stream: "<oid> <type> <size>\n<content>\n" per object.
+  defp collect_blobs(_port, 0, _buf, acc), do: acc
+
+  defp collect_blobs(port, remaining, buf, acc) do
+    case parse_blob(buf) do
+      {:ok, sha, content, rest} ->
+        collect_blobs(port, remaining - 1, rest, Map.put(acc, sha, content))
+
+      :more ->
+        receive do
+          {^port, {:data, data}} -> collect_blobs(port, remaining, buf <> data, acc)
+          {^port, {:exit_status, _}} -> acc
+        end
+    end
+  end
+
+  defp parse_blob(buf) do
+    case :binary.split(buf, "\n") do
+      [header, rest] ->
+        case String.split(header, " ") do
+          [sha, _type, size] ->
+            size = String.to_integer(size)
+            # content (size bytes) + trailing newline
+            if byte_size(rest) >= size + 1 do
+              <<content::binary-size(^size), _nl::binary-size(1), tail::binary>> = rest
+              {:ok, sha, content, tail}
+            else
+              :more
+            end
+
+          _ ->
+            :more
+        end
+
+      [_] ->
+        :more
+    end
   end
 
   @doc """

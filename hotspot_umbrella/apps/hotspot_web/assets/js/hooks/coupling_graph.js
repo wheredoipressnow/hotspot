@@ -12,10 +12,10 @@ const R_MIN = 5
 const R_MAX = 16
 const LABEL_MIN_DEGREE = 3 // standing labels for hubs; everything else is hover-only
 
-// Force-directed "cloud" of a file's temporal-coupling neighbourhood (Obsidian's
-// graph view). Nodes are files; an edge means the two change together; node color
-// ramps with `degree` (how often a file shows up as a coupling target: a hub runs
-// hot). Data arrives from the server via the `coupling:graph` event.
+// Force-directed "cloud" of a file's temporal-coupling neighbourhood. Nodes are
+// files; an edge means the two change together; node color ramps with `degree`
+// (how often a file shows up as a coupling target: a hub runs hot). Data arrives
+// from the server via the `coupling:graph` event.
 export const CouplingGraph = {
   mounted() {
     this.svg = document.createElementNS(SVGNS, "svg")
@@ -95,7 +95,7 @@ export const CouplingGraph = {
       circle.setAttribute("stroke", chrome.stroke)
       circle.addEventListener("mousemove", (e) => this.showTip(e, n))
       circle.addEventListener("mouseleave", () => this.tip.hide())
-      // Click re-roots the cloud on that file (Obsidian-style exploration).
+      // Click re-roots the cloud on that file.
       circle.addEventListener("click", () => this.pushEvent("recenter", { path: n.id }))
       this.attachDrag(circle, n)
       n._circle = circle

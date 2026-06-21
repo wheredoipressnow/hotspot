@@ -42,15 +42,52 @@ defmodule Hotspot.Analysis.RecencyTest do
       now = 1_000_000_000
 
       rows = [
-        %{churn: 3, author: "a@x", committed_at: now - 10 * @day},
-        %{churn: 4, author: "b@x", committed_at: now - 2 * @day},
-        %{churn: 1, author: "a@x", committed_at: now - 30 * @day}
+        %{churn: 3, author: "a@x", committed_at: now - 10 * @day, sha: "a"},
+        %{churn: 4, author: "b@x", committed_at: now - 2 * @day, sha: "b"},
+        %{churn: 1, author: "a@x", committed_at: now - 30 * @day, sha: "c"}
       ]
 
       m = Recency.metrics_for(rows, now: now, half_life: @half_life)
       assert m.churn == 8
       assert m.author_count == 2
       assert m.last_changed == now - 2 * @day
+      assert m.first_changed == now - 30 * @day
+    end
+
+    test "revisions counts distinct commit shas, not change rows" do
+      now = 1_000_000_000
+
+      rows = [
+        %{churn: 3, author: "a@x", committed_at: now, sha: "a"},
+        %{churn: 4, author: "b@x", committed_at: now, sha: "a"},
+        %{churn: 1, author: "a@x", committed_at: now, sha: "b"}
+      ]
+
+      assert Recency.metrics_for(rows, now: now, half_life: @half_life).revisions == 2
+    end
+
+    test "trend is :rising when recent churn beats the prior window" do
+      now = 1_000_000_000
+      opts = [now: now, half_life: @half_life]
+
+      rising = [
+        %{churn: 1, author: "a@x", committed_at: now - 100 * @day, sha: "a"},
+        %{churn: 50, author: "a@x", committed_at: now - 1 * @day, sha: "b"}
+      ]
+
+      cooling = [
+        %{churn: 50, author: "a@x", committed_at: now - 100 * @day, sha: "a"},
+        %{churn: 1, author: "a@x", committed_at: now - 1 * @day, sha: "b"}
+      ]
+
+      assert Recency.metrics_for(rising, opts).trend == :rising
+      assert Recency.metrics_for(cooling, opts).trend == :cooling
+    end
+
+    test "trend is :stable for a dormant file (no churn in either window)" do
+      now = 1_000_000_000
+      rows = [%{churn: 9, author: "a@x", committed_at: now - 10 * @half_life, sha: "a"}]
+      assert Recency.metrics_for(rows, now: now, half_life: @half_life).trend == :stable
     end
   end
 end

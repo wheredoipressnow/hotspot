@@ -1,6 +1,4 @@
-// Shared SVG chrome helpers for the hand-rolled visualisations. The cold->warm
-// ramp and theme-aware chrome here mirror what `circle_pack.js` uses; pulled out
-// so the coupling-graph hook can share them without duplicating the constants.
+// Shared SVG chrome helpers for the hand-rolled visualisations.
 
 export const SVGNS = "http://www.w3.org/2000/svg"
 

@@ -24,7 +24,14 @@ defmodule HotspotRunner.ParserTest do
     assert root.parent_count == 0
     assert root.author_name == "Ada Lovelace"
     assert root.author_email == "ada@example.com"
+    assert root.subject == "root"
     assert Enum.map(root.files, & &1.path) |> Enum.sort() == ["a.txt", "src/main.ts"]
+  end
+
+  test "captures the commit subject", %{commits: commits} do
+    subjects = Enum.map(commits, & &1.subject)
+    assert "binary" in subjects
+    assert "merge" in subjects
   end
 
   test "binary files have nil added/deleted", %{commits: commits} do

@@ -11,5 +11,6 @@ defmodule Hotspot.Storage.Commit do
     field(:author_name, :string)
     field(:author_email, :string)
     field(:parent_count, :integer)
+    field(:subject, :string)
   end
 end

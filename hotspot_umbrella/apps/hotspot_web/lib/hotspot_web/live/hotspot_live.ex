@@ -18,6 +18,7 @@ defmodule HotspotWeb.HotspotLive do
 
   @metrics [
     {"Churn", "churn"},
+    {"Revisions", "revisions"},
     {"Author count", "author_count"},
     {"Recency-weighted churn", "recency_churn"}
   ]
@@ -25,9 +26,16 @@ defmodule HotspotWeb.HotspotLive do
   # is a timestamp, meaningful as a list order but not as a circle size.
   @sorts [
     {"Churn", "churn"},
+    {"Revisions", "revisions"},
     {"Author count", "author_count"},
     {"Recency-weighted churn", "recency_churn"},
     {"Last changed", "last_changed"}
+  ]
+  # Leaf circle color encodings. "author_count" is the cool->warm ramp; "main_author"
+  # is the knowledge map (one categorical hue per dominant author).
+  @color_modes [
+    {"Author count", "author_count"},
+    {"Main author (knowledge map)", "main_author"}
   ]
   @top_limit 25
 
@@ -39,17 +47,25 @@ defmodule HotspotWeb.HotspotLive do
     end
 
     available = Analysis.removed_filter_available?()
+    complexity = Analysis.complexity_available?()
+    subjects = Analysis.subjects_available?()
     root = repo_root()
 
     {:ok,
      assign(socket,
        metric: "churn",
+       color_by: "author_count",
+       color_modes: @color_modes,
        path_filter: "",
        # Default to excluding removed files when the db can, else include all.
        include_removed: not available,
        removed_filter_available: available,
+       complexity_available: complexity,
+       subjects_available: subjects,
+       view_mode: "map",
+       scatter: [],
        show_labels: false,
-       metrics: @metrics,
+       metrics: metrics_for(complexity),
        sorts: @sorts,
        hotspots_scope: "files",
        hotspots_sort: "churn",
@@ -91,12 +107,20 @@ defmodule HotspotWeb.HotspotLive do
     socket
     |> assign(
       metric: params["metric"] || socket.assigns.metric,
+      color_by: params["color_by"] || socket.assigns.color_by,
       path_filter: params["path_filter"] || socket.assigns.path_filter,
       include_removed: include_removed,
       show_labels: params["show_labels"] == "true"
     )
     |> refresh()
     |> then(&{:noreply, &1})
+  end
+
+  def handle_event("set_view", %{"view" => view}, socket) when view in ["map", "scatter"] do
+    # Re-push the tree when returning to the map: the CirclePack hook ignores DOM
+    # updates (phx-update="ignore"), so it needs the data event to redraw.
+    socket = assign(socket, view_mode: view)
+    {:noreply, if(view == "map", do: push_tree(socket), else: socket)}
   end
 
   def handle_event("set_scope", %{"scope" => scope}, socket) do
@@ -171,7 +195,13 @@ defmodule HotspotWeb.HotspotLive do
   end
 
   def handle_event("zoom_to", %{"path" => path}, socket) do
-    {:noreply, push_event(socket, "hotspot:zoom", %{path: path})}
+    # The zoom targets the (circle-pack) map, so make it visible first: close any
+    # open X-Ray overlay and leave the scatter. The hook kept its drawing across the
+    # switch (phx-update="ignore"), so the pushed zoom lands without a re-fetch.
+    {:noreply,
+     socket
+     |> assign(xray: nil, view_mode: "map")
+     |> push_event("hotspot:zoom", %{path: path})}
   end
 
   # Clicking a file circle drills into it: query git live for per-region
@@ -185,7 +215,9 @@ defmodule HotspotWeb.HotspotLive do
         # on the (larger) source.
         {:noreply,
          socket
-         |> assign(xray: %{state: :loading, path: path, regions: []})
+         |> assign(
+           xray: %{state: :loading, path: path, regions: [], complexity: file_complexity(path)}
+         )
          |> start_async({:xray, path}, fn ->
            {HotspotRunner.Xray.file_history(repo, path), Analysis.coupling(path)}
          end)
@@ -322,6 +354,8 @@ defmodule HotspotWeb.HotspotLive do
     # Path filter is repo-specific, so clear it on a db switch; other prefs persist.
     # Removed-filter availability is per-db, so recompute it and its default.
     available = Analysis.removed_filter_available?()
+    complexity = Analysis.complexity_available?()
+    subjects = Analysis.subjects_available?()
 
     socket =
       assign(socket,
@@ -331,6 +365,11 @@ defmodule HotspotWeb.HotspotLive do
         # X-Ray paths are repo-specific, so clear it on a db switch.
         xray: nil,
         removed_filter_available: available,
+        complexity_available: complexity,
+        subjects_available: subjects,
+        metrics: metrics_for(complexity),
+        # A non-complexity db can't show the scatter; fall back to the map.
+        view_mode: if(complexity, do: socket.assigns.view_mode, else: "map"),
         include_removed: not available
       )
 
@@ -360,13 +399,33 @@ defmodule HotspotWeb.HotspotLive do
     {:noreply, assign(socket, extraction: %{state: :error, reason: inspect(reason)})}
   end
 
-  # Recompute both views: push the tree to the hook and assign the ranked list.
+  # Recompute the views after a parameter change: push the map tree to the hook,
+  # assign the ranked list, and assign the scatter points.
   defp refresh(%{assigns: %{current: nil}} = socket), do: socket
 
   defp refresh(socket) do
     socket
     |> push_tree()
     |> assign_hotspots()
+    |> assign_scatter()
+  end
+
+  defp assign_scatter(%{assigns: %{complexity_available: false}} = socket),
+    do: assign(socket, scatter: [])
+
+  defp assign_scatter(socket) do
+    params = %{
+      include_removed: socket.assigns.include_removed,
+      path_filter: socket.assigns.path_filter
+    }
+
+    scatter =
+      case Analysis.complexity_scatter(params) do
+        {:error, :no_database} -> []
+        rows -> rows
+      end
+
+    assign(socket, scatter: scatter)
   end
 
   defp push_tree(socket) do
@@ -383,8 +442,22 @@ defmodule HotspotWeb.HotspotLive do
         push_event(socket, "hotspot:tree", %{
           tree: tree,
           metric: socket.assigns.metric,
+          color_by: socket.assigns.color_by,
           labels: socket.assigns.show_labels
         })
+    end
+  end
+
+  # Size encodings. LOC needs the complexity snapshot, so it is offered only when
+  # the db carries it (older dbs hide the option rather than sizing everything to 0).
+  defp metrics_for(true), do: @metrics ++ [{"Lines of code", "loc"}]
+  defp metrics_for(false), do: @metrics
+
+  # The current file's complexity for the X-Ray header, or nil (older db, binary, absent).
+  defp file_complexity(path) do
+    case Analysis.file_complexity(path) do
+      m when is_map(m) -> m
+      _ -> nil
     end
   end
 
@@ -400,12 +473,25 @@ defmodule HotspotWeb.HotspotLive do
     }
 
     hotspots =
-      case Analysis.top_hotspots(params) do
+      case Analysis.ownership(params) do
         {:error, :no_database} -> []
-        rows -> rows
+        rows -> merge_defects(rows, socket.assigns.subjects_available, params)
       end
 
     assign(socket, hotspots: hotspots)
+  end
+
+  # Fold each file's bug-fix density into its row when the db carries subjects.
+  defp merge_defects(rows, false, _params), do: rows
+
+  defp merge_defects(rows, true, params) do
+    density =
+      case Analysis.defect_density(params) do
+        {:error, :no_database} -> %{}
+        map -> map
+      end
+
+    Enum.map(rows, &Map.put(&1, :bug_fix_density, Map.get(density, &1.path, 0.0)))
   end
 
   @impl true
@@ -426,6 +512,8 @@ defmodule HotspotWeb.HotspotLive do
           current={@current}
           metric={@metric}
           metrics={@metrics}
+          color_by={@color_by}
+          color_modes={@color_modes}
           path_filter={@path_filter}
           include_removed={@include_removed}
           removed_filter_available={@removed_filter_available}
@@ -434,14 +522,40 @@ defmodule HotspotWeb.HotspotLive do
       </.panel>
 
       <div class="flex-1 relative min-w-0 bg-base-100">
+        <%!-- Map/scatter toggle, shown only when the db carries complexity metrics. --%>
         <div
-          :if={@current}
-          id="hotspot-chart"
-          phx-hook="CirclePack"
-          phx-update="ignore"
-          class="w-full h-full"
+          :if={@current && @complexity_available}
+          class="absolute top-2 left-1/2 -translate-x-1/2 z-10 join shadow"
         >
+          <button
+            type="button"
+            phx-click="set_view"
+            phx-value-view="map"
+            class={["btn btn-xs join-item", @view_mode == "map" && "btn-active"]}
+          >
+            Map
+          </button>
+          <button
+            type="button"
+            phx-click="set_view"
+            phx-value-view="scatter"
+            class={["btn btn-xs join-item", @view_mode == "scatter" && "btn-active"]}
+          >
+            Scatter
+          </button>
         </div>
+
+        <%!-- The hook stays mounted across view switches; we only toggle the wrapper's
+        visibility. The class must live on the wrapper, not the hook element: LiveView
+        skips attribute patches on a phx-update="ignore" node, so a class toggled there
+        would never apply. --%>
+        <div :if={@current} class={["w-full h-full", @view_mode == "scatter" && "hidden"]}>
+          <div id="hotspot-chart" phx-hook="CirclePack" phx-update="ignore" class="w-full h-full">
+          </div>
+        </div>
+
+        <.scatter_plot :if={@current && @view_mode == "scatter"} points={@scatter} />
+
         <div :if={is_nil(@current)} class="h-full flex items-center justify-center px-6">
           <p class="text-sm opacity-60 text-center">
             ← Open a database in the <span class="font-semibold">Controls</span>
@@ -539,6 +653,9 @@ defmodule HotspotWeb.HotspotLive do
                   cohesion {@xray.cohesion.regions_per_commit}/commit · {cohesion_verdict(
                     @xray.cohesion.regions_per_commit
                   )}
+                </span>
+                <span :if={@xray[:complexity]} title="current size and indentation complexity">
+                  {@xray.complexity.loc} LOC · indent avg {Float.round(@xray.complexity.indent_avg, 1)} · max {@xray.complexity.indent_max}
                 </span>
               </div>
             </div>
@@ -825,6 +942,8 @@ defmodule HotspotWeb.HotspotLive do
   attr(:current, :string, default: nil)
   attr(:metric, :string, required: true)
   attr(:metrics, :list, required: true)
+  attr(:color_by, :string, required: true)
+  attr(:color_modes, :list, required: true)
   attr(:path_filter, :string, required: true)
   attr(:include_removed, :boolean, required: true)
   attr(:removed_filter_available, :boolean, required: true)
@@ -860,6 +979,15 @@ defmodule HotspotWeb.HotspotLive do
         <span class="text-sm">Metric (size)</span>
         <select name="metric" class="select select-bordered select-sm">
           <option :for={{label, value} <- @metrics} value={value} selected={value == @metric}>
+            {label}
+          </option>
+        </select>
+      </label>
+
+      <label class="flex flex-col gap-1">
+        <span class="text-sm">Color by</span>
+        <select name="color_by" class="select select-bordered select-sm">
+          <option :for={{label, value} <- @color_modes} value={value} selected={value == @color_by}>
             {label}
           </option>
         </select>
@@ -918,6 +1046,235 @@ defmodule HotspotWeb.HotspotLive do
     """
   end
 
+  # Server-rendered hotspot scatter: x = revisions (change frequency), y = indentation
+  # complexity, dot area = churn. Median guides split it into quadrants; the top-right
+  # (often-changed AND complex) is the prioritize-for-refactoring zone.
+  @scatter_w 1000
+  @scatter_h 640
+  @scatter_pad %{left: 64, right: 28, top: 28, bottom: 52}
+
+  attr(:points, :list, required: true)
+
+  defp scatter_plot(assigns) do
+    assigns =
+      assigns
+      |> assign(:geom, scatter_geometry(assigns.points))
+      |> assign(:w, @scatter_w)
+      |> assign(:h, @scatter_h)
+
+    ~H"""
+    <div
+      id="scatter-plot"
+      phx-hook="Scatter"
+      class="w-full h-full flex items-center justify-center p-4"
+    >
+      <p :if={@geom == :empty} class="text-sm opacity-60 text-center">
+        No files with complexity metrics in view.
+      </p>
+      <svg
+        :if={@geom != :empty}
+        viewBox={"0 0 #{@w} #{@h}"}
+        preserveAspectRatio="xMidYMid meet"
+        class="w-full h-full"
+      >
+        <%!-- Log-scale gridlines + tick labels (powers of ten) --%>
+        <g :for={t <- @geom.xticks}>
+          <line
+            x1={t.pos}
+            y1={@geom.y0}
+            x2={t.pos}
+            y2={@geom.y1}
+            class="stroke-base-200"
+            stroke-width="1"
+          />
+          <text
+            x={t.pos}
+            y={@geom.y0 + 20}
+            text-anchor="middle"
+            class="fill-base-content text-[13px] opacity-40"
+          >
+            {t.label}
+          </text>
+        </g>
+        <g :for={t <- @geom.yticks}>
+          <line
+            x1={@geom.x0}
+            y1={t.pos}
+            x2={@geom.x1}
+            y2={t.pos}
+            class="stroke-base-200"
+            stroke-width="1"
+          />
+          <text
+            x={@geom.x0 - 8}
+            y={t.pos + 4}
+            text-anchor="end"
+            class="fill-base-content text-[13px] opacity-40"
+          >
+            {t.label}
+          </text>
+        </g>
+
+        <%!-- Axes --%>
+        <line
+          x1={@geom.x0}
+          y1={@geom.y0}
+          x2={@geom.x1}
+          y2={@geom.y0}
+          class="stroke-base-300"
+          stroke-width="1"
+        />
+        <line
+          x1={@geom.x0}
+          y1={@geom.y0}
+          x2={@geom.x0}
+          y2={@geom.y1}
+          class="stroke-base-300"
+          stroke-width="1"
+        />
+
+        <%!-- Median quadrant guides --%>
+        <line
+          x1={@geom.vline}
+          y1={@geom.y0}
+          x2={@geom.vline}
+          y2={@geom.y1}
+          class="stroke-base-300"
+          stroke-width="1"
+          stroke-dasharray="4 4"
+        />
+        <line
+          x1={@geom.x0}
+          y1={@geom.hline}
+          x2={@geom.x1}
+          y2={@geom.hline}
+          class="stroke-base-300"
+          stroke-width="1"
+          stroke-dasharray="4 4"
+        />
+
+        <text
+          x={@geom.x1}
+          y={@geom.y0 + 32}
+          text-anchor="end"
+          class="fill-base-content text-[18px] opacity-70"
+        >
+          revisions →
+        </text>
+        <text
+          x={@geom.x0 - 44}
+          y={@geom.y1 - 8}
+          text-anchor="start"
+          class="fill-base-content text-[18px] opacity-70"
+        >
+          ↑ indentation complexity
+        </text>
+        <text
+          x={@geom.x1 - 6}
+          y={@geom.y1 + 20}
+          text-anchor="end"
+          class="fill-error text-[16px] opacity-80"
+        >
+          prioritize
+        </text>
+
+        <circle
+          :for={p <- @geom.points}
+          cx={p.cx}
+          cy={p.cy}
+          r={p.r}
+          class={[
+            (p.top_right && "fill-error") || "fill-primary",
+            "opacity-60 hover:opacity-100 cursor-pointer"
+          ]}
+          data-xray-path={p.path}
+        >
+          <title>
+            {p.path}: {p.revisions} revisions · complexity {p.complexity} · churn {p.churn}
+          </title>
+        </circle>
+      </svg>
+    </div>
+    """
+  end
+
+  # Map raw points into SVG geometry, or :empty when there is nothing to plot.
+  defp scatter_geometry([]), do: :empty
+
+  defp scatter_geometry(points) do
+    x0 = @scatter_pad.left
+    x1 = @scatter_w - @scatter_pad.right
+    y0 = @scatter_h - @scatter_pad.bottom
+    y1 = @scatter_pad.top
+
+    # Revisions and complexity are heavily right-skewed (a few files dominate), so
+    # both axes are log-scaled to spread the cloud out instead of piling it at the origin.
+    max_rev = points |> Enum.map(& &1.revisions) |> Enum.max() |> max(1)
+    max_cx = points |> Enum.map(& &1.indent_total) |> Enum.max() |> max(1)
+    max_churn = points |> Enum.map(& &1.churn) |> Enum.max() |> max(1)
+
+    lx = :math.log10(max_rev + 1)
+    ly = :math.log10(max_cx + 1)
+    xpos = fn v -> x0 + (x1 - x0) * log_frac(v, lx) end
+    ypos = fn v -> y0 - (y0 - y1) * log_frac(v, ly) end
+
+    med_rev = median(Enum.map(points, & &1.revisions))
+    med_cx = median(Enum.map(points, & &1.indent_total))
+
+    scaled =
+      Enum.map(points, fn p ->
+        %{
+          path: p.path,
+          revisions: p.revisions,
+          complexity: p.indent_total,
+          churn: p.churn,
+          cx: xpos.(p.revisions),
+          cy: ypos.(p.indent_total),
+          r: 4 + 16 * :math.sqrt(p.churn / max_churn),
+          top_right: p.revisions >= med_rev and p.indent_total >= med_cx
+        }
+      end)
+
+    %{
+      x0: x0,
+      x1: x1,
+      y0: y0,
+      y1: y1,
+      vline: xpos.(med_rev),
+      hline: ypos.(med_cx),
+      xticks: Enum.map(log_ticks(max_rev), &%{pos: xpos.(&1), label: tick_label(&1)}),
+      yticks: Enum.map(log_ticks(max_cx), &%{pos: ypos.(&1), label: tick_label(&1)}),
+      points: scaled
+    }
+  end
+
+  # Fraction along a log axis whose span is `log_max` (= log10(max + 1)).
+  defp log_frac(_v, +0.0), do: 0.0
+  defp log_frac(v, log_max), do: :math.log10(v + 1) / log_max
+
+  # Powers of ten up to `max` (1, 10, 100, ...), the natural ticks on a log axis.
+  defp log_ticks(max) do
+    Stream.iterate(1, &(&1 * 10))
+    |> Enum.take_while(&(&1 <= max))
+  end
+
+  defp tick_label(n) when n >= 1000, do: "#{div(n, 1000)}k"
+  defp tick_label(n), do: Integer.to_string(n)
+
+  defp median([]), do: 0
+
+  defp median(values) do
+    sorted = Enum.sort(values)
+    n = length(sorted)
+    mid = div(n, 2)
+
+    if rem(n, 2) == 1 do
+      Enum.at(sorted, mid)
+    else
+      (Enum.at(sorted, mid - 1) + Enum.at(sorted, mid)) / 2
+    end
+  end
+
   # --- Top hotspots panel body -----------------------------------------------
 
   attr(:current, :string, default: nil)
@@ -965,6 +1322,28 @@ defmodule HotspotWeb.HotspotLive do
           >
             <span class="text-xs opacity-50 w-5 shrink-0">{i}</span>
             <span class="font-mono text-xs truncate grow">{h.path}</span>
+            <span
+              :if={h[:bus_factor?]}
+              class="text-xs text-warning shrink-0"
+              title={"#{round((h.ownership || 0) * 100)}% owned by #{author_label(h.main_author)}: bus-factor risk"}
+            >⚠</span>
+            <span
+              :if={h[:abandoned?]}
+              title={"owner #{author_label(h.main_author)} has gone inactive: abandoned knowledge"}
+              class="shrink-0"
+            >
+              <.icon name="hero-user-minus" class="size-3 opacity-60" />
+            </span>
+            <span
+              :if={defect_badge?(h)}
+              class="text-xs text-error shrink-0 tabular-nums"
+              title={"#{round(h.bug_fix_density * 100)}% of commits are bug fixes"}
+            >
+              🐛 {round(h.bug_fix_density * 100)}%
+            </span>
+            <span :if={badge = trend_badge(h)} class={badge.class} title={badge.help}>
+              {badge.marker}
+            </span>
             <span class="text-xs opacity-70 shrink-0">
               {sort_value(h, @sort)}
             </span>
@@ -979,7 +1358,33 @@ defmodule HotspotWeb.HotspotLive do
   defp sort_value(h, "author_count"), do: "#{h.author_count}a"
   defp sort_value(h, "recency_churn"), do: h.recency_churn
   defp sort_value(h, "last_changed"), do: relative_age(h.last_changed)
+  defp sort_value(h, "revisions"), do: "#{h.revisions}×"
   defp sort_value(h, _churn), do: h.churn
+
+  # Show the defect badge only when fixes are a meaningful share of the file's
+  # history, so a single incidental fix on a young file does not light it up.
+  defp defect_badge?(%{bug_fix_density: d}) when is_float(d), do: d >= 0.25
+  defp defect_badge?(_), do: false
+
+  # Rising/cooling badge: recent churn vs the prior half-life window. Stable files
+  # (and older dbs without the metric) show nothing.
+  defp trend_badge(%{trend: :rising}) do
+    %{
+      marker: "▲",
+      class: "text-xs text-error shrink-0",
+      help: "rising: more churn in the last window than before"
+    }
+  end
+
+  defp trend_badge(%{trend: :cooling}) do
+    %{
+      marker: "▼",
+      class: "text-xs text-info shrink-0",
+      help: "cooling: less churn in the last window than before"
+    }
+  end
+
+  defp trend_badge(_), do: nil
 
   # Compact "time ago" label for an epoch second, e.g. "3d", "5mo", "2y".
   defp relative_age(epoch) when is_integer(epoch) and epoch > 0 do

@@ -9,7 +9,7 @@ defmodule Hotspot.Analysis.Coupling do
       coupling = shared_commits / commits_touching(path)
 
   i.e. "when `path` changes, how often does the other file change too". Renames
-  are not folded in this first cut, so a file's pre-rename path counts separately.
+  are not folded, so a file's pre-rename path counts separately.
   """
   import Ecto.Query
   alias Hotspot.Repo

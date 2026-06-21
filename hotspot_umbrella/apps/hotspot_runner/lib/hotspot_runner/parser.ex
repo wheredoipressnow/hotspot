@@ -7,12 +7,13 @@ defmodule HotspotRunner.Parser do
   @moduledoc """
   Streaming parser for the byte stream produced by:
 
-      git log <ref> -z --numstat -M --pretty=format:'%x00%H%x00%at%x00%aN%x00%aE%x00%P'
+      git log <ref> -z --numstat -M --pretty=format:'%x00%H%x00%at%x00%aN%x00%aE%x00%P%x00%s'
 
   Framing (derived from captured real git output):
 
     * Each commit begins with a leading NUL then a 40- or 64-hex SHA.
-    * Header: `SHA \\0 epoch \\0 name \\0 email \\0 parents`, terminated by `\\n`.
+    * Header: `SHA \\0 epoch \\0 name \\0 email \\0 parents \\0 subject`, terminated
+      by `\\n`. Subject is the commit's first message line (may be empty).
     * The numstat block follows the `\\n`; each entry is NUL-terminated:
       * normal/binary: `"added\\tdeleted\\tpath"` (binary => added/deleted are `-`)
       * rename: `"added\\tdeleted\\t" \\0 oldpath \\0 newpath`
@@ -24,7 +25,7 @@ defmodule HotspotRunner.Parser do
 
   A commit record is a map:
 
-      %{sha, committed_at, author_name, author_email, parent_count, files, renames}
+      %{sha, committed_at, author_name, author_email, parent_count, subject, files, renames}
 
   where `files` is a list of `%{path, added, deleted}` (added/deleted `nil` for
   binary) and `renames` a list of `%{old_path, new_path, similarity}`.
@@ -170,6 +171,7 @@ defmodule HotspotRunner.Parser do
 
         parents = (Enum.at(fields, 4) || "") |> String.trim()
         parent_count = if parents == "", do: 0, else: length(String.split(parents, " "))
+        subject = Enum.at(fields, 5) || ""
 
         {files, renames} = parse_entries(body_text)
 
@@ -179,6 +181,7 @@ defmodule HotspotRunner.Parser do
           author_name: name,
           author_email: email,
           parent_count: parent_count,
+          subject: subject,
           files: files,
           renames: renames
         }

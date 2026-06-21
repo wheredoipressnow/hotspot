@@ -11,13 +11,18 @@ defmodule HotspotRunner.Writer do
 
   alias Exqlite.Sqlite3
 
+  # Bump when the schema or captured fields change; the reader gates new features
+  # on `meta('schema_version')` so older dbs keep working until re-extracted.
+  @schema_version "2"
+
   @schema """
   CREATE TABLE IF NOT EXISTS commit_info (
     sha          TEXT PRIMARY KEY,
     committed_at INTEGER NOT NULL,
     author_name  TEXT NOT NULL,
     author_email TEXT NOT NULL,
-    parent_count INTEGER NOT NULL
+    parent_count INTEGER NOT NULL,
+    subject      TEXT
   );
 
   CREATE TABLE IF NOT EXISTS file_change (
@@ -42,7 +47,10 @@ defmodule HotspotRunner.Writer do
   );
 
   CREATE TABLE IF NOT EXISTS tracked_file (
-    path TEXT PRIMARY KEY
+    path         TEXT PRIMARY KEY,
+    loc          INTEGER,
+    indent_total INTEGER,
+    indent_max   INTEGER
   );
 
   CREATE INDEX IF NOT EXISTS idx_file_change_commit ON file_change(commit_sha);
@@ -65,7 +73,9 @@ defmodule HotspotRunner.Writer do
     :ok = Sqlite3.execute(conn, "PRAGMA foreign_keys = ON;")
     :ok = Sqlite3.execute(conn, @schema)
 
-    %__MODULE__{conn: conn, stmts: prepare_all(conn)}
+    w = %__MODULE__{conn: conn, stmts: prepare_all(conn)}
+    set_meta(w, "schema_version", @schema_version)
+    w
   end
 
   @doc "Release prepared statements and close the connection."
@@ -89,7 +99,15 @@ defmodule HotspotRunner.Writer do
     Enum.each(commits, fn c ->
       run(w, s.del_files, [c.sha])
       run(w, s.del_renames, [c.sha])
-      run(w, s.ins_commit, [c.sha, c.committed_at, c.author_name, c.author_email, c.parent_count])
+
+      run(w, s.ins_commit, [
+        c.sha,
+        c.committed_at,
+        c.author_name,
+        c.author_email,
+        c.parent_count,
+        c.subject
+      ])
 
       Enum.each(c.files, fn f ->
         run(w, s.ins_file, [c.sha, f.path, f.added, f.deleted])
@@ -111,12 +129,19 @@ defmodule HotspotRunner.Writer do
   pin `meta('tracked_sha')`, in one transaction. A whole-tree snapshot, so it is
   always replaced (not appended), keeping the `tracked_sha == last_sha` invariant
   the reader checks.
+
+  Each entry is `%{path, loc, indent_total, indent_max}`; the metric fields are
+  `nil` for binary files.
   """
-  @spec replace_tracked_files(t(), [String.t()], String.t()) :: :ok
-  def replace_tracked_files(%__MODULE__{conn: conn, stmts: s} = w, paths, sha) do
+  @spec replace_tracked_files(t(), [map()], String.t()) :: :ok
+  def replace_tracked_files(%__MODULE__{conn: conn, stmts: s} = w, files, sha) do
     :ok = Sqlite3.execute(conn, "BEGIN")
     run(w, s.del_tracked, [])
-    Enum.each(paths, fn p -> run(w, s.ins_tracked, [p]) end)
+
+    Enum.each(files, fn f ->
+      run(w, s.ins_tracked, [f.path, f.loc, f.indent_total, f.indent_max])
+    end)
+
     run(w, s.set_meta, ["tracked_sha", sha])
     :ok = Sqlite3.execute(conn, "COMMIT")
     :ok
@@ -161,7 +186,7 @@ defmodule HotspotRunner.Writer do
       ins_commit:
         prep(
           conn,
-          "INSERT OR REPLACE INTO commit_info (sha, committed_at, author_name, author_email, parent_count) VALUES (?, ?, ?, ?, ?)"
+          "INSERT OR REPLACE INTO commit_info (sha, committed_at, author_name, author_email, parent_count, subject) VALUES (?, ?, ?, ?, ?, ?)"
         ),
       ins_file:
         prep(
@@ -174,7 +199,11 @@ defmodule HotspotRunner.Writer do
           "INSERT INTO rename_edge (commit_sha, old_path, new_path, similarity) VALUES (?, ?, ?, ?)"
         ),
       del_tracked: prep(conn, "DELETE FROM tracked_file"),
-      ins_tracked: prep(conn, "INSERT OR IGNORE INTO tracked_file (path) VALUES (?)"),
+      ins_tracked:
+        prep(
+          conn,
+          "INSERT OR IGNORE INTO tracked_file (path, loc, indent_total, indent_max) VALUES (?, ?, ?, ?)"
+        ),
       set_meta: prep(conn, "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)"),
       get_meta: prep(conn, "SELECT value FROM meta WHERE key = ?")
     }

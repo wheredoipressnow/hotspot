@@ -15,6 +15,16 @@ function colorFor(value, min, max) {
   return `rgb(${c[0]}, ${c[1]}, ${c[2]})`
 }
 
+// Knowledge map: a stable hue per author, so files owned by the same person share
+// a color. No author (churn-free file) falls back to a neutral gray.
+function authorColor(author) {
+  if (!author) return "rgb(160,160,160)"
+  let hash = 0
+  for (let i = 0; i < author.length; i++) hash = (hash * 31 + author.charCodeAt(i)) | 0
+  const hue = ((hash % 360) + 360) % 360
+  return `hsl(${hue}, 55%, 55%)`
+}
+
 // Compact "time ago" label for an epoch-second timestamp, e.g. "3d", "5mo", "2y".
 function relativeAge(epoch) {
   if (!epoch) return "—"
@@ -37,6 +47,7 @@ function themeChrome() {
 export const CirclePack = {
   mounted() {
     this.metric = "churn"
+    this.colorBy = "author_count"
     this.labels = false
     this.focus = null
 
@@ -54,6 +65,11 @@ export const CirclePack = {
     style.textContent =
       "circle{transition:cx .5s,cy .5s,r .5s,fill .3s}" +
       "circle.node--leaf:hover{stroke:var(--leaf-hover);stroke-width:2}" +
+      // Flash a target circle so selecting it always gives feedback, even when the
+      // zoom does not move (e.g. picking another file in the already-centered folder).
+      "circle.node--flash{animation:node-flash .9s ease-out}" +
+      "@keyframes node-flash{0%{stroke:var(--leaf-hover);stroke-width:6;stroke-opacity:1}" +
+      "100%{stroke:var(--leaf-hover);stroke-width:0;stroke-opacity:0}}" +
       "text.node--label{pointer-events:none;text-anchor:middle;dominant-baseline:central;" +
       "font-family:sans-serif;transition:opacity .3s}"
     this.svg.appendChild(style)
@@ -80,8 +96,9 @@ export const CirclePack = {
     // Background click zooms back out to the root.
     this.svg.addEventListener("click", () => this.zoomTo(this.root))
 
-    this.handleEvent("hotspot:tree", ({ tree, metric, labels }) => {
+    this.handleEvent("hotspot:tree", ({ tree, metric, color_by, labels }) => {
       this.metric = metric || "churn"
+      this.colorBy = color_by || "author_count"
       this.labels = !!labels
       this.draw(tree)
     })
@@ -89,7 +106,9 @@ export const CirclePack = {
     // A row in the top-hotspots panel asks the chart to focus a path.
     this.handleEvent("hotspot:zoom", ({ path }) => {
       const node = this.findByPath(path)
-      if (node) this.zoomTo(node.children ? node : node.parent || node)
+      if (!node) return
+      this.zoomTo(node.children ? node : node.parent || node)
+      this.flash(node)
     })
 
     // Recolor chrome (not data) when the theme flips; root.html.heex updates
@@ -138,12 +157,15 @@ export const CirclePack = {
           e.stopPropagation()
           this.zoomTo(d)
         })
-        // Containers now carry context too: dir path + aggregated rollup.
         circle.addEventListener("mousemove", (e) => this.showTip(e, d))
         circle.addEventListener("mouseleave", () => this.hideTip())
       } else {
         circle.setAttribute("class", "node--leaf")
-        circle.setAttribute("fill", colorFor(d.data.author_count || 0, min, max))
+        const fill =
+          this.colorBy === "main_author"
+            ? authorColor(d.data.main_author)
+            : colorFor(d.data.author_count || 0, min, max)
+        circle.setAttribute("fill", fill)
         circle.addEventListener("mousemove", (e) => this.showTip(e, d))
         circle.addEventListener("mouseleave", () => this.hideTip())
         // Clicking a file drills into it: the server X-Rays its history.
@@ -208,8 +230,18 @@ export const CirclePack = {
     label.style.opacity = "1"
   },
 
+  // Briefly outline a node's circle. Re-adding the class after a reflow restarts
+  // the animation when the same node is picked twice in a row.
+  flash(node) {
+    const circle = node._circle
+    if (!circle) return
+    circle.classList.remove("node--flash")
+    void circle.getBBox()
+    circle.classList.add("node--flash")
+  },
+
   // Find a node by its path: leaves carry `data.path`; containers are matched by
-  // the path rebuilt from their ancestry (mirrors the top-hotspots folder keys).
+  // the path rebuilt from their ancestry.
   findByPath(path) {
     if (!this.root) return null
     return this.root.descendants().find((d) => {
@@ -254,8 +286,12 @@ export const CirclePack = {
       const churn = d.data.churn ?? 0
       const authors = d.data.author_count ?? 0
       const recency = d.data.recency_churn ?? 0
+      const revisions = d.data.revisions ?? 0
       const changed = relativeAge(d.data.last_changed)
-      html = `<strong>${d.data.path}</strong><br>churn ${churn} · authors ${authors}<br>recent ${recency} · changed ${changed}`
+      const owner = d.data.main_author
+        ? `<br>owner ${d.data.main_author.split("@")[0]} (${Math.round((d.data.ownership || 0) * 100)}%)`
+        : ""
+      html = `<strong>${d.data.path}</strong><br>churn ${churn} · ${revisions} revisions · authors ${authors}<br>recent ${recency} · changed ${changed}${owner}`
     }
     this.tooltip.innerHTML = html
     this.tooltip.style.left = `${event.clientX + 12}px`

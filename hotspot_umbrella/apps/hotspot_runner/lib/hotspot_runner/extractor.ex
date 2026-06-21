@@ -6,9 +6,9 @@ defmodule HotspotRunner.Extractor do
   tracked files.
   """
 
-  alias HotspotRunner.{DbPath, Git, Parser, Writer}
+  alias HotspotRunner.{DbPath, Git, Parser, TreeScan, Writer}
 
-  # Commits per transaction (HANDOFF §4).
+  # Commits per transaction.
   @batch_size 1000
 
   @type result :: %{
@@ -55,9 +55,10 @@ defmodule HotspotRunner.Extractor do
 
       case consume(port, writer, on_progress) do
         {:ok, total} ->
-          # Pin to the exact tip we extracted to, then snapshot tracked files.
+          # Pin to the exact tip we extracted to, then snapshot tracked files
+          # with their current size + indentation metrics.
           Writer.set_meta(writer, "last_sha", tip)
-          tracked = Git.tracked_files(toplevel, tip)
+          tracked = TreeScan.scan(toplevel, tip)
           Writer.replace_tracked_files(writer, tracked, tip)
 
           {:ok,

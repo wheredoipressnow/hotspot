@@ -16,7 +16,7 @@ defmodule Hotspot.Analysis.Hotspots do
   alias Hotspot.Analysis.{Recency, Renames, Tracked}
   alias Hotspot.Storage.{Commit, FileChange}
 
-  @sorts ~w(churn author_count recency_churn last_changed)
+  @sorts ~w(churn author_count recency_churn last_changed revisions)
 
   @type params :: %{
           optional(:sort) => String.t(),
@@ -28,10 +28,11 @@ defmodule Hotspot.Analysis.Hotspots do
         }
 
   @doc """
-  Returns `[%{path, churn, author_count, recency_churn, last_changed}]` sorted by
-  `sort` descending. Options: `sort` (`"churn"` | `"author_count"` |
-  `"recency_churn"` | `"last_changed"`, default `"churn"`), `scope` (`"files"` |
-  `"folders"`), `limit` (default 25).
+  Returns `[%{path, churn, author_count, recency_churn, last_changed,
+  first_changed, revisions, trend}]` sorted by `sort` descending. Options: `sort`
+  (`"churn"` | `"author_count"` | `"recency_churn"` | `"last_changed"` |
+  `"revisions"`, default `"churn"`), `scope` (`"files"` | `"folders"`), `limit`
+  (default 25).
   """
   @spec top(params) :: [map]
   def top(params \\ %{}) do
@@ -52,8 +53,7 @@ defmodule Hotspot.Analysis.Hotspots do
   defp sort_key(sort) when sort in @sorts, do: String.to_existing_atom(sort)
   defp sort_key(_), do: :churn
 
-  # Per-change rows `%{path, churn, author, committed_at}`, paths folded onto
-  # rename terminals when include_removed is false.
+  # Per-change rows, paths folded onto rename terminals when include_removed is false.
   defp raw_rows(params) do
     include_merges = Map.get(params, :include_merges, false)
     include_removed = Map.get(params, :include_removed, true)
@@ -65,6 +65,7 @@ defmodule Hotspot.Analysis.Hotspots do
         where: not is_nil(f.added),
         select: %{
           path: f.path,
+          sha: f.commit_sha,
           churn: f.added + f.deleted,
           author: c.author_email,
           committed_at: c.committed_at

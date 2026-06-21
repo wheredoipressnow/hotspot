@@ -21,7 +21,7 @@ defmodule Hotspot.Analysis.Tree do
   """
   import Ecto.Query
   alias Hotspot.Repo
-  alias Hotspot.Analysis.{Recency, Renames, Tracked}
+  alias Hotspot.Analysis.{Complexity, Recency, Renames, Tracked}
   alias Hotspot.Storage.{Commit, FileChange}
 
   @type params :: %{
@@ -37,7 +37,8 @@ defmodule Hotspot.Analysis.Tree do
       %{name: "root", children: [
         %{name: "lib", children: [
           %{name: "app.ex", path: "lib/app.ex", churn: 412, author_count: 3,
-            recency_churn: 88, last_changed: 1_718_900_000}]}]}
+            recency_churn: 88, last_changed: 1_718_900_000,
+            first_changed: 1_700_000_000, revisions: 27, trend: :cooling}]}]}
   """
   @spec tree_for_visualization(params) :: map
   def tree_for_visualization(params \\ %{}) do
@@ -46,9 +47,8 @@ defmodule Hotspot.Analysis.Tree do
     |> build_tree()
   end
 
-  # Per-file aggregates of `%{path, churn, author_count, recency_churn, last_changed}`.
   # Recency weighting requires per-change rows scored in code (see
-  # `Hotspot.Analysis.Recency`), so we aggregate in Elixir uniformly. When
+  # `Hotspot.Analysis.Recency`), so we aggregate per file in Elixir. When
   # include_removed is false we additionally fold renames onto their terminal path
   # before grouping and drop paths gone from HEAD.
   defp aggregate(params) do
@@ -58,6 +58,7 @@ defmodule Hotspot.Analysis.Tree do
 
     rename = if include_removed, do: %{}, else: Renames.map()
     opts = [now: Recency.now(), half_life: Recency.half_life_seconds()]
+    metrics = Complexity.metrics_map()
 
     include_merges
     |> change_rows()
@@ -65,10 +66,27 @@ defmodule Hotspot.Analysis.Tree do
     |> Enum.map(fn {path, rows} -> Map.put(Recency.metrics_for(rows, opts), :path, path) end)
     |> then(if include_removed, do: & &1, else: &Tracked.filter/1)
     |> filter_path_list(path_filter)
+    |> Enum.map(&merge_complexity(&1, metrics))
   end
 
-  # Per-change rows `%{path, churn, author, committed_at}`. Binary rows
-  # (added IS NULL) are excluded from churn; merges excluded unless include_merges.
+  # Fold in current size + indentation for files present in the snapshot; files
+  # absent from it (removed, or an older db) get zeros so the LOC encoding shrinks them.
+  defp merge_complexity(row, metrics) do
+    case Map.get(metrics, row.path) do
+      nil ->
+        Map.merge(row, %{loc: 0, indent_total: 0, indent_max: 0})
+
+      m ->
+        Map.merge(row, %{
+          loc: m.loc || 0,
+          indent_total: m.indent_total || 0,
+          indent_max: m.indent_max || 0
+        })
+    end
+  end
+
+  # Binary rows (added IS NULL) are excluded from churn; merges excluded unless
+  # include_merges.
   defp change_rows(include_merges) do
     from(f in FileChange,
       join: c in Commit,
@@ -76,6 +94,7 @@ defmodule Hotspot.Analysis.Tree do
       where: not is_nil(f.added),
       select: %{
         path: f.path,
+        sha: f.commit_sha,
         churn: f.added + f.deleted,
         author: c.author_email,
         committed_at: c.committed_at
@@ -121,7 +140,15 @@ defmodule Hotspot.Analysis.Tree do
           churn: leaf.churn || 0,
           author_count: leaf.author_count || 0,
           recency_churn: leaf.recency_churn || 0,
-          last_changed: leaf.last_changed || 0
+          last_changed: leaf.last_changed || 0,
+          first_changed: leaf.first_changed || 0,
+          revisions: leaf.revisions || 0,
+          trend: leaf.trend || :stable,
+          main_author: leaf.main_author,
+          ownership: leaf.ownership || 0.0,
+          loc: leaf.loc || 0,
+          indent_total: leaf.indent_total || 0,
+          indent_max: leaf.indent_max || 0
         }
       else
         %{name: name, children: to_children(children)}
