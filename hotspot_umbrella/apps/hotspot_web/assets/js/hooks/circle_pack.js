@@ -146,7 +146,11 @@ export const CirclePack = {
         circle.setAttribute("fill", colorFor(d.data.author_count || 0, min, max))
         circle.addEventListener("mousemove", (e) => this.showTip(e, d))
         circle.addEventListener("mouseleave", () => this.hideTip())
-        circle.addEventListener("click", (e) => e.stopPropagation())
+        // Clicking a file drills into it: the server X-Rays its history.
+        circle.addEventListener("click", (e) => {
+          e.stopPropagation()
+          if (d.data.path) this.pushEvent("xray", { path: d.data.path })
+        })
       }
 
       d._circle = circle

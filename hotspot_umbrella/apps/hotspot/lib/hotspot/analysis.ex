@@ -29,12 +29,31 @@ defmodule Hotspot.Analysis do
   end
 
   @doc """
+  Files that most often change together with `path` (temporal coupling). See
+  `Hotspot.Analysis.Coupling`. Returns `{:error, :no_database}` when no db is open.
+  """
+  def coupling(path, opts \\ []) do
+    with_database(fn -> Hotspot.Analysis.Coupling.top(path, opts) end)
+  end
+
+  @doc """
   Whether the open db can exclude removed (deleted) files, i.e. whether it carries a
   current `tracked_file` snapshot. `false` when no db is open or on an older db without
   that snapshot, in which case `include_removed: false` only folds renames.
   """
   def removed_filter_available? do
     with_database(&Hotspot.Analysis.Tracked.available?/0) == true
+  end
+
+  @doc """
+  Absolute path of the repo the open db was extracted from (`meta.repo_path`),
+  needed by the live file X-Ray which queries git directly. Returns `nil` when
+  unset, `{:error, :no_database}` when no db is open.
+  """
+  def repo_path do
+    with_database(fn ->
+      Repo.one(from(m in Meta, where: m.key == "repo_path", select: m.value))
+    end)
   end
 
   @doc """

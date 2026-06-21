@@ -1,0 +1,40 @@
+# Low-priority attributes for the file X-Ray (passed via
+# `git -c core.attributesFile=...`). Maps common extensions to git's built-in
+# userdiff drivers so hunk section headings track real definitions instead of
+# the crude default heuristic. A target repo's own .gitattributes still wins.
+#
+# Only languages git ships a built-in driver for are listed; unmapped types
+# (Haskell, JS/TS, ...) fall back to git's default heading. Ambiguous
+# extensions (e.g. *.m) are intentionally left out.
+
+*.ex    diff=elixir
+*.exs   diff=elixir
+*.py    diff=python
+*.rb    diff=ruby
+*.go    diff=golang
+*.rs    diff=rust
+*.java  diff=java
+*.kt    diff=kotlin
+*.kts   diff=kotlin
+*.c     diff=cpp
+*.h     diff=cpp
+*.cc    diff=cpp
+*.cpp   diff=cpp
+*.cxx   diff=cpp
+*.hpp   diff=cpp
+*.hh    diff=cpp
+*.cs    diff=csharp
+*.php   diff=php
+*.pl    diff=perl
+*.pm    diff=perl
+*.css   diff=css
+*.html  diff=html
+*.htm   diff=html
+*.scm   diff=scheme
+*.md    diff=markdown
+*.tex   diff=tex
+*.ads   diff=ada
+*.adb   diff=ada
+*.f     diff=fortran
+*.f90   diff=fortran
+*.bib   diff=bibtex

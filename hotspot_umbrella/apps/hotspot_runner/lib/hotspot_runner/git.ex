@@ -11,6 +11,11 @@ defmodule HotspotRunner.Git do
   @pretty "format:%x00%H%x00%at%x00%aN%x00%aE%x00%P"
   @common ["-z", "--numstat", "-M", "--no-color", "--pretty=" <> @pretty]
 
+  # X-Ray single-file log: RS-prefixed header, US-delimited fields. RS (0x1e) /
+  # US (0x1f) are control bytes that can't appear in patch text, so commit
+  # headers stay unambiguous against the interleaved `git log -p` output.
+  @xray_pretty "format:%x1e%H%x1f%at%x1f%aN%x1f%aE%x1f%P"
+
   @doc "Resolve the repository top-level dir (so a subdir invocation maps to one db)."
   @spec toplevel(String.t()) :: String.t()
   def toplevel(cwd) do
@@ -62,6 +67,75 @@ defmodule HotspotRunner.Git do
       [:binary, :exit_status, :use_stdio, {:args, args}, {:cd, to_charlist(cwd)}]
     )
   end
+
+  @doc """
+  Args for the X-Ray single-file patch log: full history of one `path`,
+  following renames (`--follow -M`), with zero-context patches (`-p
+  --unified=0`). Each hunk header keeps its section heading (the enclosing
+  region, computed by git's diff drivers at that revision), which the parser
+  attributes churn to. Counts come from the `@@` ranges, not the body.
+  """
+  @spec file_log_args(String.t(), String.t()) :: [String.t()]
+  def file_log_args(ref, path) do
+    [
+      "-c",
+      "core.quotePath=false",
+      # Low-priority driver map so hunk headings track real definitions where git
+      # has a built-in driver; a target repo's own .gitattributes still overrides.
+      "-c",
+      "core.attributesFile=" <> attrs_path(),
+      "log",
+      ref,
+      "--follow",
+      "-M",
+      "--no-color",
+      "-p",
+      "--unified=0",
+      "--pretty=" <> @xray_pretty,
+      "--",
+      path
+    ]
+  end
+
+  @doc """
+  Run the X-Ray single-file patch log in `cwd`, returning raw stdout. A single
+  file's history is small enough to buffer (unlike full extraction), so this
+  uses `System.cmd`. stderr is kept separate so it never corrupts the patch
+  stream.
+  """
+  @spec file_log(String.t(), String.t(), String.t()) :: {:ok, binary} | {:error, String.t()}
+  def file_log(cwd, ref, path) do
+    case System.cmd("git", file_log_args(ref, path), cd: cwd, stderr_to_stdout: false) do
+      {out, 0} -> {:ok, out}
+      {_out, code} -> {:error, "git log -p for #{path} failed (#{code})"}
+    end
+  end
+
+  @doc """
+  Args for a per-line blame of `path` at `ref`. `--line-porcelain` repeats the
+  full commit info (incl. `summary`, the change reason) on every line, so each
+  line is self-describing and easy to parse.
+  """
+  @spec blame_args(String.t(), String.t()) :: [String.t()]
+  def blame_args(ref, path) do
+    ["-c", "core.quotePath=false", "blame", "--line-porcelain", ref, "--", path]
+  end
+
+  @doc """
+  Run `git blame --line-porcelain` in `cwd`, returning raw stdout. stderr is kept
+  separate so a failure (binary file, path absent at `ref`) doesn't corrupt the
+  output.
+  """
+  @spec blame(String.t(), String.t(), String.t()) :: {:ok, binary} | {:error, String.t()}
+  def blame(cwd, ref, path) do
+    case System.cmd("git", blame_args(ref, path), cd: cwd, stderr_to_stdout: false) do
+      {out, 0} -> {:ok, out}
+      {_out, code} -> {:error, "git blame for #{path} failed (#{code})"}
+    end
+  end
+
+  # Bundled extension->driver map shipped in priv (see priv/xray.gitattributes).
+  defp attrs_path, do: Application.app_dir(:hotspot_runner, "priv/xray.gitattributes")
 
   defp run(cwd, args) do
     case System.cmd("git", args, cd: cwd, stderr_to_stdout: true) do
