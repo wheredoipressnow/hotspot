@@ -536,14 +536,10 @@ defmodule HotspotWeb.HotspotLive do
 
   defp repo_picker(assigns) do
     ~H"""
-    <div
-      class="fixed inset-0 z-40 flex items-center justify-center bg-black/40"
-      phx-click="close_picker"
-    >
+    <div class="fixed inset-0 z-40 flex items-center justify-center bg-black/40">
       <div
-        class="bg-base-100 rounded-lg shadow-xl w-[34rem] max-w-[92vw] max-h-[80vh] flex flex-col"
+        class="bg-base-100 rounded-lg shadow-xl w-[34rem] max-w-[92vw] h-[32rem] max-h-[85vh] flex flex-col"
         phx-click-away="close_picker"
-        onclick="event.stopPropagation()"
       >
         <div class="flex items-center justify-between px-4 py-3 border-b border-base-300">
           <span class="font-semibold">Open repository</span>

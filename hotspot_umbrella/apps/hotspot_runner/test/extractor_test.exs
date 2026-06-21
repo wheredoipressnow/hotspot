@@ -11,10 +11,11 @@ defmodule HotspotRunner.ExtractorTest do
     repo = Path.join(System.tmp_dir!(), "hotspot_repo_#{System.unique_integer([:positive])}")
     File.mkdir_p!(repo)
 
-    # Isolate the db dir so we never touch the real ~/.local/share/hotspot.
+    # Isolate the db dir so we never touch the real configured one. DbPath reads
+    # `:hotspot, :db_dir`, so override that (not XDG_DATA_HOME).
     data = Path.join(System.tmp_dir!(), "hotspot_data_#{System.unique_integer([:positive])}")
-    prev = System.get_env("XDG_DATA_HOME")
-    System.put_env("XDG_DATA_HOME", data)
+    prev = Application.get_env(:hotspot, :db_dir)
+    Application.put_env(:hotspot, :db_dir, data)
 
     git(repo, ["init", "-q", "-b", "main"])
     git(repo, ["config", "user.email", "ada@example.com"])
@@ -23,7 +24,10 @@ defmodule HotspotRunner.ExtractorTest do
     on_exit(fn ->
       File.rm_rf!(repo)
       File.rm_rf!(data)
-      if prev, do: System.put_env("XDG_DATA_HOME", prev), else: System.delete_env("XDG_DATA_HOME")
+
+      if prev,
+        do: Application.put_env(:hotspot, :db_dir, prev),
+        else: Application.delete_env(:hotspot, :db_dir)
     end)
 
     %{repo: repo}

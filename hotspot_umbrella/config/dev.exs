@@ -2,11 +2,14 @@ import Config
 
 # Per-repo `.db` files live here, written by the `hotspot_runner` app
 # (`HotspotRunner.DbPath`) and discovered for reading by `Hotspot.Storage`.
-# Both must resolve to the same directory.
+# Both must resolve to the same directory. A relative `HOTSPOT_DB_DIR` is anchored
+# to the umbrella root (this config file's parent), not the current working
+# directory, which Mix transiently changes while compiling umbrella apps.
 config :hotspot,
        :db_dir,
-       System.get_env("HOTSPOT_DB_DIR") ||
-         Path.join(System.get_env("XDG_DATA_HOME") || Path.expand("~/.local/share"), "hotspot")
+       (System.get_env("HOTSPOT_DB_DIR") ||
+          Path.join(System.get_env("XDG_DATA_HOME") || Path.expand("~/.local/share"), "hotspot"))
+       |> Path.expand(Path.expand("..", __DIR__))
 
 # Connection defaults merged in whenever Hotspot.Storage starts the pool.
 config :hotspot, Hotspot.Repo,
