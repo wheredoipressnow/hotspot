@@ -57,6 +57,9 @@ defmodule HotspotWeb.HotspotLive do
        # File deep-dive overlay (nil = showing the map). Set by clicking a circle,
        # cleared by "Back to map".
        xray: nil,
+       # Force-directed coupling "cloud" overlay (nil = closed). Opened from the
+       # X-Ray dashboard; re-rooted by clicking a node.
+       coupling_graph: nil,
        prefs_open: true,
        hotspots_open: true,
        dbs: Storage.list(),
@@ -200,6 +203,44 @@ defmodule HotspotWeb.HotspotLive do
     {:noreply, assign(socket, xray: nil)}
   end
 
+  # Open the force-directed coupling "cloud" for the X-Rayed file (default depth 2).
+  def handle_event("open_coupling_graph", %{"path" => path}, socket) do
+    {:noreply, start_graph(socket, path, 2)}
+  end
+
+  # Depth selector in the cloud overlay: re-expand at the new hop count.
+  def handle_event(
+        "set_graph_depth",
+        %{"depth" => depth},
+        %{assigns: %{coupling_graph: %{path: path}}} = socket
+      ) do
+    {:noreply, start_graph(socket, path, to_depth(depth))}
+  end
+
+  # Clicking a node re-roots the cloud on that file, keeping the current depth.
+  def handle_event(
+        "recenter",
+        %{"path" => path},
+        %{assigns: %{coupling_graph: %{depth: depth}}} = socket
+      ) do
+    {:noreply, start_graph(socket, path, depth)}
+  end
+
+  def handle_event("close_coupling_graph", _params, socket) do
+    {:noreply, assign(socket, coupling_graph: nil)}
+  end
+
+  # The hook came alive (or remounted): re-send the current graph if it's ready.
+  def handle_event(
+        "coupling:ready",
+        _params,
+        %{assigns: %{coupling_graph: %{state: :ready, data: data}}} = socket
+      ) do
+    {:noreply, push_event(socket, "coupling:graph", data)}
+  end
+
+  def handle_event("coupling:ready", _params, socket), do: {:noreply, socket}
+
   @impl true
   # Region history + coupling. Merge (not replace) so a source result that already
   # arrived isn't clobbered; both clauses guard on the still-current path.
@@ -228,6 +269,40 @@ defmodule HotspotWeb.HotspotLive do
       end
 
     {:noreply, merge_xray(socket, path, %{source: source})}
+  end
+
+  # Coupling-graph build finished. Push to the hook only if the result still matches
+  # the open overlay's path+depth (a fast click could have superseded it).
+  def handle_async({:coupling_graph, path, depth}, result, socket) do
+    case {socket.assigns.coupling_graph, result} do
+      {%{path: ^path, depth: ^depth} = cg, {:ok, %{nodes: _} = graph}} ->
+        {:noreply,
+         socket
+         |> assign(coupling_graph: %{cg | state: :ready, data: graph})
+         |> push_event("coupling:graph", graph)}
+
+      {%{path: ^path, depth: ^depth} = cg, _} ->
+        {:noreply, assign(socket, coupling_graph: %{cg | state: :error})}
+
+      _ ->
+        {:noreply, socket}
+    end
+  end
+
+  # Set the loading overlay and kick off the (db-bound) graph build off-process.
+  defp start_graph(socket, path, depth) do
+    socket
+    |> assign(coupling_graph: %{state: :loading, path: path, depth: depth, data: nil})
+    |> start_async({:coupling_graph, path, depth}, fn ->
+      Analysis.coupling_graph(path, depth: depth)
+    end)
+  end
+
+  defp to_depth(depth) do
+    case Integer.parse(to_string(depth)) do
+      {n, _} -> n |> max(1) |> min(3)
+      :error -> 2
+    end
   end
 
   # Apply a patch to the live X-Ray assign only if it still targets `path`.
@@ -379,6 +454,9 @@ defmodule HotspotWeb.HotspotLive do
           :if={@current && @xray && @xray.state in [:loading, :ready, :error]}
           xray={@xray}
         />
+
+        <%!-- The coupling cloud overlays the X-Ray dashboard when opened. --%>
+        <.coupling_graph_view :if={@current && @coupling_graph} graph={@coupling_graph} />
       </div>
 
       <.panel open={@hotspots_open} side="right" title="Top hotspots" toggle="toggle_hotspots">
@@ -423,6 +501,16 @@ defmodule HotspotWeb.HotspotLive do
         <span class="font-mono text-xs truncate opacity-70" title={@xray.path}>
           {Path.basename(@xray.path)}
         </span>
+        <button
+          :if={@ready}
+          type="button"
+          phx-click="open_coupling_graph"
+          phx-value-path={@xray.path}
+          class="btn btn-sm btn-ghost gap-1 ml-auto"
+          title="Explore this file's coupling neighbourhood as a graph"
+        >
+          <.icon name="hero-share" class="size-4" /> Coupling graph
+        </button>
       </div>
 
       <div class="grow overflow-auto">
@@ -439,115 +527,186 @@ defmodule HotspotWeb.HotspotLive do
         </div>
 
         <div :if={@ready} class="flex flex-col lg:flex-row gap-4 p-4 h-full">
-        <div class="lg:w-[34rem] lg:shrink-0 space-y-5">
-        <div>
-          <div class="font-mono text-sm truncate" title={@xray.path}>{@xray.path}</div>
-          <div class="text-xs opacity-60 mt-1 flex flex-wrap gap-x-4 gap-y-1">
-            <span>{length(@xray.regions)} regions</span>
-            <span :if={@xray.span}>
-              active {relative_age(@xray.span.first)} → {relative_age(@xray.span.last)}
-            </span>
-            <span title="average distinct regions touched per commit">
-              cohesion {@xray.cohesion.regions_per_commit}/commit ·
-              {cohesion_verdict(@xray.cohesion.regions_per_commit)}
-            </span>
-          </div>
-        </div>
-
-        <p :if={@regions == []} class="text-sm opacity-60">No attributable changes to chart.</p>
-
-        <div :if={@regions != []}>
-          <div class="text-xs opacity-60 mb-2">
-            Changed regions over time: hotter cells = more churn; rows hot in the
-            same columns tend to be entangled. Click a region for its commits.
-          </div>
-          <div class="overflow-x-auto">
-            <ol class="space-y-0.5 min-w-fit">
-              <li :for={r <- @regions}>
-                <details class="rounded hover:bg-base-200 [&_summary::-webkit-details-marker]:hidden">
-                  <summary class="flex items-center gap-2 px-1 py-0.5 cursor-pointer list-none">
-                    <span class="font-mono text-xs truncate w-48 shrink-0 flex items-center gap-1" title={r.name}>
-                      <span class="truncate">{r.name}</span>
-                      <span :if={r.name == unattributed_name()} title={unattributed_help()} class="shrink-0">
-                        <.icon name="hero-information-circle" class="size-3 opacity-60" />
-                      </span>
-                    </span>
-                    <span class="flex gap-px shrink-0">
-                      <span
-                        :for={v <- r.heat}
-                        class="w-3 h-3 rounded-sm"
-                        style={heat_style(v, @maxcell)}
-                        title={"churn #{v}"}
-                      />
-                    </span>
-                    <span class="text-[11px] opacity-60 whitespace-nowrap ml-auto pl-2">
-                      {r.churn} · {r.author_count}a
-                      <span
-                        :if={owner_risk?(r)}
-                        class="text-warning"
-                        title={"#{round(r.top_author_share * 100)}% by #{author_label(r.top_author)}: knowledge risk"}
-                      >⚠</span>
-                    </span>
-                  </summary>
-
-                  <ul class="pl-48 pr-2 pt-1 pb-2 space-y-0.5">
-                    <li :for={c <- Enum.take(r.commits, 15)} class="flex items-center gap-2 text-[11px]">
-                      <span class="font-mono opacity-60 shrink-0">{short_sha(c.sha)}</span>
-                      <span class="truncate grow opacity-70" title={c.author}>{author_label(c.author)}</span>
-                      <span class="opacity-50 shrink-0">{relative_age(c.committed_at)}</span>
-                      <span class="opacity-70 shrink-0 tabular-nums">+{c.churn}</span>
-                    </li>
-                    <li :if={length(r.commits) > 15} class="text-[11px] opacity-40 pl-1">
-                      + {length(r.commits) - 15} more
-                    </li>
-                  </ul>
-                </details>
-              </li>
-            </ol>
-          </div>
-          <div
-            :if={@xray.buckets != []}
-            class="flex justify-between text-[11px] opacity-50 mt-1"
-            style="margin-left: 12.5rem; max-width: 13rem"
-          >
-            <span>{List.first(@xray.buckets).label}</span>
-            <span>{List.last(@xray.buckets).label}</span>
-          </div>
-          <p :if={@extra > 0} class="text-[11px] opacity-40 mt-1">+ {@extra} more regions</p>
-          <p class="text-[11px] opacity-40 mt-3 leading-snug">
-            Regions are git diff section headings: accurate for languages git has a
-            driver for, approximate otherwise.
-          </p>
-        </div>
-
-        <div :if={@xray.coupling != []}>
-          <div class="text-xs opacity-60 mb-2">
-            Changes together with (temporal coupling, share of this file's commits)
-          </div>
-          <ul class="space-y-1 max-w-2xl">
-            <li :for={c <- @xray.coupling}>
-              <button
-                type="button"
-                phx-click="xray"
-                phx-value-path={c.path}
-                class="w-full flex items-center gap-2 text-left px-1 py-0.5 rounded hover:bg-base-200"
-                title={"drill into #{c.path}"}
-              >
-                <span class="font-mono text-xs truncate grow">{c.path}</span>
-                <span class="h-1.5 rounded bg-primary/60 shrink-0" style={"width: #{round(c.coupling * 60)}px"} />
-                <span class="text-[11px] opacity-60 shrink-0 w-24 text-right">
-                  {round(c.coupling * 100)}% · {c.shared_commits}c
+          <div class="lg:w-[34rem] lg:shrink-0 space-y-5">
+            <div>
+              <div class="font-mono text-sm truncate" title={@xray.path}>{@xray.path}</div>
+              <div class="text-xs opacity-60 mt-1 flex flex-wrap gap-x-4 gap-y-1">
+                <span>{length(@xray.regions)} regions</span>
+                <span :if={@xray.span}>
+                  active {relative_age(@xray.span.first)} → {relative_age(@xray.span.last)}
                 </span>
-              </button>
-            </li>
-          </ul>
+                <span title="average distinct regions touched per commit">
+                  cohesion {@xray.cohesion.regions_per_commit}/commit · {cohesion_verdict(
+                    @xray.cohesion.regions_per_commit
+                  )}
+                </span>
+              </div>
+            </div>
+
+            <p :if={@regions == []} class="text-sm opacity-60">No attributable changes to chart.</p>
+
+            <div :if={@regions != []}>
+              <div class="text-xs opacity-60 mb-2">
+                Changed regions over time: hotter cells = more churn; rows hot in the
+                same columns tend to be entangled. Click a region for its commits.
+              </div>
+              <div class="overflow-x-auto">
+                <ol class="space-y-0.5 min-w-fit">
+                  <li :for={r <- @regions}>
+                    <details class="rounded hover:bg-base-200 [&_summary::-webkit-details-marker]:hidden">
+                      <summary class="flex items-center gap-2 px-1 py-0.5 cursor-pointer list-none">
+                        <span
+                          class="font-mono text-xs truncate w-48 shrink-0 flex items-center gap-1"
+                          title={r.name}
+                        >
+                          <span class="truncate">{r.name}</span>
+                          <span
+                            :if={r.name == unattributed_name()}
+                            title={unattributed_help()}
+                            class="shrink-0"
+                          >
+                            <.icon name="hero-information-circle" class="size-3 opacity-60" />
+                          </span>
+                        </span>
+                        <span class="flex gap-px shrink-0">
+                          <span
+                            :for={v <- r.heat}
+                            class="w-3 h-3 rounded-sm"
+                            style={heat_style(v, @maxcell)}
+                            title={"churn #{v}"}
+                          />
+                        </span>
+                        <span class="text-[11px] opacity-60 whitespace-nowrap ml-auto pl-2">
+                          {r.churn} · {r.author_count}a
+                          <span
+                            :if={owner_risk?(r)}
+                            class="text-warning"
+                            title={"#{round(r.top_author_share * 100)}% by #{author_label(r.top_author)}: knowledge risk"}
+                          >⚠</span>
+                        </span>
+                      </summary>
+
+                      <ul class="pl-48 pr-2 pt-1 pb-2 space-y-0.5">
+                        <li
+                          :for={c <- Enum.take(r.commits, 15)}
+                          class="flex items-center gap-2 text-[11px]"
+                        >
+                          <span class="font-mono opacity-60 shrink-0">{short_sha(c.sha)}</span>
+                          <span class="truncate grow opacity-70" title={c.author}>{author_label(
+                            c.author
+                          )}</span>
+                          <span class="opacity-50 shrink-0">{relative_age(c.committed_at)}</span>
+                          <span class="opacity-70 shrink-0 tabular-nums">+{c.churn}</span>
+                        </li>
+                        <li :if={length(r.commits) > 15} class="text-[11px] opacity-40 pl-1">
+                          + {length(r.commits) - 15} more
+                        </li>
+                      </ul>
+                    </details>
+                  </li>
+                </ol>
+              </div>
+              <div
+                :if={@xray.buckets != []}
+                class="flex justify-between text-[11px] opacity-50 mt-1"
+                style="margin-left: 12.5rem; max-width: 13rem"
+              >
+                <span>{List.first(@xray.buckets).label}</span>
+                <span>{List.last(@xray.buckets).label}</span>
+              </div>
+              <p :if={@extra > 0} class="text-[11px] opacity-40 mt-1">+ {@extra} more regions</p>
+              <p class="text-[11px] opacity-40 mt-3 leading-snug">
+                Regions are git diff section headings: accurate for languages git has a
+                driver for, approximate otherwise.
+              </p>
+            </div>
+
+            <div :if={@xray.coupling != []}>
+              <div class="text-xs opacity-60 mb-2">
+                Changes together with (temporal coupling, share of this file's commits)
+              </div>
+              <ul class="space-y-1 max-w-2xl">
+                <li :for={c <- @xray.coupling}>
+                  <button
+                    type="button"
+                    phx-click="xray"
+                    phx-value-path={c.path}
+                    class="w-full flex items-center gap-2 text-left px-1 py-0.5 rounded hover:bg-base-200"
+                    title={"drill into #{c.path}"}
+                  >
+                    <span class="font-mono text-xs truncate grow">{c.path}</span>
+                    <span
+                      class="h-1.5 rounded bg-primary/60 shrink-0"
+                      style={"width: #{round(c.coupling * 60)}px"}
+                    />
+                    <span class="text-[11px] opacity-60 shrink-0 w-24 text-right">
+                      {round(c.coupling * 100)}% · {c.shared_commits}c
+                    </span>
+                  </button>
+                </li>
+              </ul>
+            </div>
+            <p :if={@xray.coupling == []} class="text-xs opacity-40">
+              No notable cross-file coupling.
+            </p>
+          </div>
+
+          <div class="grow min-w-0 lg:h-full">
+            <.source_pane source={@xray[:source]} />
+          </div>
         </div>
-        <p :if={@xray.coupling == []} class="text-xs opacity-40">No notable cross-file coupling.</p>
+      </div>
+    </div>
+    """
+  end
+
+  # --- Coupling graph ("cloud") overlay --------------------------------------
+  # Force-directed neighbourhood of the X-Rayed file: nodes are files, an edge means
+  # they change together, node color ramps with how often a file is coupled (hubs run
+  # hot). Layout + interaction live in the `CouplingGraph` JS hook; this just frames
+  # it with a header, a depth selector, and the mount point.
+
+  attr(:graph, :map, required: true)
+
+  defp coupling_graph_view(assigns) do
+    ~H"""
+    <div class="absolute inset-0 z-20 bg-base-100 flex flex-col">
+      <div class="sticky top-0 z-10 flex items-center gap-3 px-4 py-2 border-b border-base-300 bg-base-100/95 backdrop-blur">
+        <button type="button" phx-click="close_coupling_graph" class="btn btn-sm btn-ghost gap-1">
+          <.icon name="hero-arrow-left" class="size-4" /> Back to X-Ray
+        </button>
+        <span class="font-mono text-xs truncate opacity-70" title={@graph.path}>
+          {Path.basename(@graph.path)} · coupling cloud
+        </span>
+        <form phx-change="set_graph_depth" class="ml-auto flex items-center gap-2 text-xs opacity-70">
+          <label for="graph-depth">depth</label>
+          <select id="graph-depth" name="depth" class="select select-xs select-bordered">
+            <option :for={d <- 1..3} value={d} selected={d == @graph.depth}>{d}</option>
+          </select>
+        </form>
+      </div>
+
+      <div class="grow relative min-h-0">
+        <div
+          :if={@graph.state == :loading}
+          class="absolute inset-0 flex items-center justify-center gap-2 text-sm opacity-70 z-10"
+        >
+          <span class="loading loading-spinner loading-sm" /> Building coupling cloud…
+        </div>
+        <div
+          :if={@graph.state == :error}
+          class="absolute inset-0 flex items-center justify-center px-6 text-sm text-error z-10"
+        >
+          Could not build the coupling cloud.
         </div>
 
-        <div class="grow min-w-0 lg:h-full">
-          <.source_pane source={@xray[:source]} />
+        <%!-- Kept mounted across depth/recenter changes; new data arrives via push_event. --%>
+        <div id="coupling-graph" phx-hook="CouplingGraph" phx-update="ignore" class="w-full h-full">
         </div>
+
+        <div class="absolute bottom-2 left-3 text-[11px] opacity-50 leading-snug max-w-md">
+          Files that change together. Hotter = coupled to more files. Drag to nudge;
+          click a node to re-center the cloud on it.
         </div>
       </div>
     </div>
@@ -587,7 +746,10 @@ defmodule HotspotWeb.HotspotLive do
         No source to show (binary file or not present at HEAD).
       </p>
 
-      <div :if={@lines != []} class="grow min-h-0 overflow-auto rounded border border-base-300 bg-base-200/40">
+      <div
+        :if={@lines != []}
+        class="grow min-h-0 overflow-auto rounded border border-base-300 bg-base-200/40"
+      >
         <table class="font-mono text-xs leading-5 w-full">
           <tbody>
             <tr

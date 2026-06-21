@@ -37,6 +37,15 @@ defmodule Hotspot.Analysis do
   end
 
   @doc """
+  Recursively-expanded coupling graph rooted at `path` for the force-directed
+  ("cloud") view. See `Hotspot.Analysis.Coupling.graph/2`. Returns
+  `{:error, :no_database}` when no db is open.
+  """
+  def coupling_graph(path, opts \\ []) do
+    with_database(fn -> Hotspot.Analysis.Coupling.graph(path, opts) end)
+  end
+
+  @doc """
   Whether the open db can exclude removed (deleted) files, i.e. whether it carries a
   current `tracked_file` snapshot. `false` when no db is open or on an older db without
   that snapshot, in which case `include_removed: false` only folds renames.
