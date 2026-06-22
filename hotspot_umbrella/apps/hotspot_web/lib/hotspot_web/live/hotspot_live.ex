@@ -1311,47 +1311,70 @@ defmodule HotspotWeb.HotspotLive do
 
       <p :if={@hotspots == []} class="text-sm opacity-60">No data.</p>
 
-      <ol class="space-y-1">
+      <ol class="space-y-0.5">
         <li :for={{h, i} <- Enum.with_index(@hotspots, 1)}>
           <button
             type="button"
             phx-click="zoom_to"
             phx-value-path={h.path}
-            class="w-full text-left flex items-center gap-2 px-2 py-1 rounded hover:bg-base-300"
+            class="w-full text-left flex gap-2 px-2 py-1.5 rounded hover:bg-base-300"
             title={h.path}
           >
-            <span class="text-xs opacity-50 w-5 shrink-0">{i}</span>
-            <span class="font-mono text-xs truncate grow">{h.path}</span>
-            <span
-              :if={h[:bus_factor?]}
-              class="text-xs text-warning shrink-0"
-              title={"#{round((h.ownership || 0) * 100)}% owned by #{author_label(h.main_author)}: bus-factor risk"}
-            >⚠</span>
-            <span
-              :if={h[:abandoned?]}
-              title={"owner #{author_label(h.main_author)} has gone inactive: abandoned knowledge"}
-              class="shrink-0"
-            >
-              <.icon name="hero-user-minus" class="size-3 opacity-60" />
-            </span>
-            <span
-              :if={defect_badge?(h)}
-              class="text-xs text-error shrink-0 tabular-nums"
-              title={"#{round(h.bug_fix_density * 100)}% of commits are bug fixes"}
-            >
-              🐛 {round(h.bug_fix_density * 100)}%
-            </span>
-            <span :if={badge = trend_badge(h)} class={badge.class} title={badge.help}>
-              {badge.marker}
-            </span>
-            <span class="text-xs opacity-70 shrink-0">
-              {sort_value(h, @sort)}
+            <span class="text-xs opacity-40 tabular-nums w-5 shrink-0 pt-0.5">{i}</span>
+
+            <span class="grow min-w-0 flex flex-col gap-0.5">
+              <%!-- line 1: filename + sorted metric --%>
+              <span class="flex items-baseline gap-2">
+                <span class="font-mono text-sm font-medium truncate grow">
+                  {Path.basename(h.path)}
+                </span>
+                <span class="text-xs opacity-70 tabular-nums shrink-0">
+                  {sort_value(h, @sort)}
+                </span>
+              </span>
+
+              <%!-- line 2: directory + risk badges --%>
+              <span class="flex items-center gap-1.5 text-[11px]">
+                <span class="path-tail font-mono opacity-45 truncate grow min-w-0">
+                  {dir_label(h.path)}
+                </span>
+                <span
+                  :if={h[:bus_factor?]}
+                  class="text-warning shrink-0"
+                  title={"#{round((h.ownership || 0) * 100)}% owned by #{author_label(h.main_author)}: bus-factor risk"}
+                >⚠</span>
+                <span
+                  :if={h[:abandoned?]}
+                  title={"owner #{author_label(h.main_author)} has gone inactive: abandoned knowledge"}
+                  class="shrink-0"
+                >
+                  <.icon name="hero-user-minus" class="size-3 opacity-60" />
+                </span>
+                <span
+                  :if={defect_badge?(h)}
+                  class="text-error shrink-0 tabular-nums"
+                  title={"#{round(h.bug_fix_density * 100)}% of commits are bug fixes"}
+                >
+                  🐛 {round(h.bug_fix_density * 100)}%
+                </span>
+                <span :if={badge = trend_badge(h)} class={badge.class} title={badge.help}>
+                  {badge.marker}
+                </span>
+              </span>
             </span>
           </button>
         </li>
       </ol>
     </div>
     """
+  end
+
+  # Directory portion of a hotspot path; blank for repo-root files.
+  defp dir_label(path) do
+    case Path.dirname(path) do
+      "." -> ""
+      dir -> dir
+    end
   end
 
   # The value shown per row is the one being sorted on.
