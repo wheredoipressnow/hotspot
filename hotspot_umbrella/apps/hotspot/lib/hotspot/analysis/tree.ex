@@ -21,13 +21,15 @@ defmodule Hotspot.Analysis.Tree do
   """
   import Ecto.Query
   alias Hotspot.Repo
-  alias Hotspot.Analysis.{Complexity, Recency, Renames, Tracked}
+  alias Hotspot.Analysis.{Complexity, Recency, Renames, Tracked, Window}
   alias Hotspot.Storage.{Commit, FileChange}
 
   @type params :: %{
           optional(:path_filter) => String.t() | nil,
           optional(:include_merges) => boolean,
-          optional(:include_removed) => boolean
+          optional(:include_removed) => boolean,
+          optional(:since) => integer | nil,
+          optional(:until) => integer | nil
         }
 
   @doc """
@@ -52,7 +54,6 @@ defmodule Hotspot.Analysis.Tree do
   # include_removed is false we additionally fold renames onto their terminal path
   # before grouping and drop paths gone from HEAD.
   defp aggregate(params) do
-    include_merges = Map.get(params, :include_merges, false)
     include_removed = Map.get(params, :include_removed, true)
     path_filter = Map.get(params, :path_filter)
 
@@ -60,7 +61,7 @@ defmodule Hotspot.Analysis.Tree do
     opts = [now: Recency.now(), half_life: Recency.half_life_seconds()]
     metrics = Complexity.metrics_map()
 
-    include_merges
+    params
     |> change_rows()
     |> Enum.group_by(&Renames.resolve(rename, &1.path))
     |> Enum.map(fn {path, rows} -> Map.put(Recency.metrics_for(rows, opts), :path, path) end)
@@ -86,8 +87,10 @@ defmodule Hotspot.Analysis.Tree do
   end
 
   # Binary rows (added IS NULL) are excluded from churn; merges excluded unless
-  # include_merges.
-  defp change_rows(include_merges) do
+  # include_merges; commits outside the time window dropped via `Window`.
+  defp change_rows(params) do
+    include_merges = Map.get(params, :include_merges, false)
+
     from(f in FileChange,
       join: c in Commit,
       on: c.sha == f.commit_sha,
@@ -101,6 +104,7 @@ defmodule Hotspot.Analysis.Tree do
       }
     )
     |> maybe_exclude_merges(include_merges)
+    |> Window.restrict(params)
     |> Repo.all()
   end
 

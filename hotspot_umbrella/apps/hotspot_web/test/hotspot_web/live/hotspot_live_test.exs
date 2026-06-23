@@ -12,13 +12,14 @@ defmodule HotspotWeb.HotspotLiveTest do
     end
   end
 
-  test "with a db loaded, renders the hotspots view with controls", %{conn: conn} do
+  test "with a db loaded, renders the hotspots view with the top bar and panels", %{conn: conn} do
     reopen_fixture()
 
     {:ok, _view, html} = live(conn, ~p"/")
-    assert html =~ "Controls"
+    # Top bar (repo management + global time range) and the docked panels.
+    assert html =~ "Open repository"
+    assert html =~ "All time"
     assert html =~ "Top hotspots"
-    assert html =~ "Path filter"
     assert html =~ ~s(phx-hook="CirclePack")
   end
 

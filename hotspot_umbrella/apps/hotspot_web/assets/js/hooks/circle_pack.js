@@ -93,8 +93,8 @@ export const CirclePack = {
     })
     document.body.appendChild(this.tooltip)
 
-    // Background click zooms back out to the root.
-    this.svg.addEventListener("click", () => this.zoomTo(this.root))
+    // Background click zooms back out to the root (and reports the new scope).
+    this.svg.addEventListener("click", () => this.zoomTo(this.root, true, true))
 
     this.handleEvent("hotspot:tree", ({ tree, metric, color_by, labels }) => {
       this.metric = metric || "churn"
@@ -155,7 +155,7 @@ export const CirclePack = {
         circle.setAttribute("stroke", chrome.stroke)
         circle.addEventListener("click", (e) => {
           e.stopPropagation()
-          this.zoomTo(d)
+          this.zoomTo(d, true, true)
         })
         circle.addEventListener("mousemove", (e) => this.showTip(e, d))
         circle.addEventListener("mouseleave", () => this.hideTip())
@@ -194,7 +194,9 @@ export const CirclePack = {
   },
 
   // Reposition every circle so `focus` fills the viewport (transitions animate it).
-  zoomTo(focus, _animate = true) {
+  // `emit` reports the new scope to the server; pass it true only for user-initiated
+  // zooms (folder/background clicks), not the initial draw or a server-driven zoom.
+  zoomTo(focus, _animate = true, emit = false) {
     if (!focus) return
     this.focus = focus
     const k = SIZE / (focus.r * 2)
@@ -210,6 +212,21 @@ export const CirclePack = {
       c.setAttribute("r", r)
       this.placeLabel(d, cx, cy, r)
     }
+
+    if (emit) this.pushEvent("scope_changed", { path: this.pathOf(focus) })
+  },
+
+  // Path a node represents: a leaf's own path, a folder's path rebuilt from its
+  // ancestry, or "" for the root.
+  pathOf(node) {
+    if (!node || node === this.root) return ""
+    if (!node.children && node.data) return node.data.path || ""
+    return node
+      .ancestors()
+      .reverse()
+      .slice(1)
+      .map((n) => n.data.name)
+      .join("/")
   },
 
   // Labels only show for the folders one level below the current focus (revealed

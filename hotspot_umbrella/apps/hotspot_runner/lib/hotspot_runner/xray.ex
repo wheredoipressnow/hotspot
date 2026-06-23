@@ -54,14 +54,17 @@ defmodule HotspotRunner.Xray do
 
   @doc """
   Behavioral history of `path` in the repo at `repo_path`. `opts`: `:ref`
-  (default `"HEAD"`); `:now` / `:half_life` are forwarded to recency scoring
-  (defaulted by `Recency`).
+  (default `"HEAD"`); `:since` / `:until` (epoch bounds restricting the commits
+  considered); `:now` / `:half_life` are forwarded to recency scoring (defaulted
+  by `Recency`).
   """
   @spec file_history(String.t(), String.t(), keyword) :: {:ok, history} | {:error, String.t()}
   def file_history(repo_path, path, opts \\ []) do
     ref = Keyword.get(opts, :ref, "HEAD")
+    since = Keyword.get(opts, :since)
+    until = Keyword.get(opts, :until)
 
-    case Git.file_log(repo_path, ref, path) do
+    case Git.file_log(repo_path, ref, path, since, until) do
       {:ok, output} -> {:ok, output |> XrayParser.parse() |> analyze(opts)}
       {:error, _} = error -> error
     end

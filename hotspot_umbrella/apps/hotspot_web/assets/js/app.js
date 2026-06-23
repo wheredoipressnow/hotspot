@@ -26,13 +26,14 @@ import {hooks as colocatedHooks} from "phoenix-colocated/hotspot_web"
 import {CirclePack} from "./hooks/circle_pack.js"
 import {CouplingGraph} from "./hooks/coupling_graph.js"
 import {Scatter} from "./hooks/scatter.js"
+import {Palette} from "./hooks/palette.js"
 import topbar from "../vendor/topbar"
 
 const csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
 const liveSocket = new LiveSocket("/live", Socket, {
   longPollFallbackMs: 2500,
   params: {_csrf_token: csrfToken},
-  hooks: {...colocatedHooks, CirclePack, CouplingGraph, Scatter},
+  hooks: {...colocatedHooks, CirclePack, CouplingGraph, Scatter, Palette},
 })
 
 // Show progress bar on live navigation and form submits

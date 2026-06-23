@@ -13,7 +13,7 @@ defmodule Hotspot.Analysis.Defects do
   """
   import Ecto.Query
   alias Hotspot.Repo
-  alias Hotspot.Analysis.{Renames, Tracked}
+  alias Hotspot.Analysis.{Renames, Tracked, Window}
   alias Hotspot.Storage.{Commit, FileChange}
 
   # "fix" only at a word boundary (so prefix/suffix/affix do not match), plus the
@@ -73,6 +73,7 @@ defmodule Hotspot.Analysis.Defects do
         select: %{path: f.path, sha: f.commit_sha, subject: c.subject}
       )
       |> maybe_exclude_merges(include_merges)
+      |> Window.restrict(params)
       |> Repo.all()
 
     rows

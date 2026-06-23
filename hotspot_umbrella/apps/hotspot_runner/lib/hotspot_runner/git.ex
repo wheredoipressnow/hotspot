@@ -161,8 +161,8 @@ defmodule HotspotRunner.Git do
   region, computed by git's diff drivers at that revision), which the parser
   attributes churn to. Counts come from the `@@` ranges, not the body.
   """
-  @spec file_log_args(String.t(), String.t()) :: [String.t()]
-  def file_log_args(ref, path) do
+  @spec file_log_args(String.t(), String.t(), integer | nil, integer | nil) :: [String.t()]
+  def file_log_args(ref, path, since \\ nil, until \\ nil) do
     [
       "-c",
       "core.quotePath=false",
@@ -177,11 +177,20 @@ defmodule HotspotRunner.Git do
       "--no-color",
       "-p",
       "--unified=0",
-      "--pretty=" <> @xray_pretty,
-      "--",
-      path
-    ]
+      "--pretty=" <> @xray_pretty
+    ] ++ window_args(since, until) ++ ["--", path]
   end
+
+  # `--since`/`--until` bounds for the file log, given epoch seconds (either may be
+  # nil for an open end). Git accepts ISO 8601 timestamps for both.
+  defp window_args(since, until) do
+    maybe_arg("--since=", since) ++ maybe_arg("--until=", until)
+  end
+
+  defp maybe_arg(_flag, nil), do: []
+
+  defp maybe_arg(flag, epoch),
+    do: [flag <> (epoch |> DateTime.from_unix!() |> DateTime.to_iso8601())]
 
   @doc """
   Run the X-Ray single-file patch log in `cwd`, returning raw stdout. A single
@@ -189,9 +198,13 @@ defmodule HotspotRunner.Git do
   uses `System.cmd`. stderr is kept separate so it never corrupts the patch
   stream.
   """
-  @spec file_log(String.t(), String.t(), String.t()) :: {:ok, binary} | {:error, String.t()}
-  def file_log(cwd, ref, path) do
-    case System.cmd("git", file_log_args(ref, path), cd: cwd, stderr_to_stdout: false) do
+  @spec file_log(String.t(), String.t(), String.t(), integer | nil, integer | nil) ::
+          {:ok, binary} | {:error, String.t()}
+  def file_log(cwd, ref, path, since \\ nil, until \\ nil) do
+    case System.cmd("git", file_log_args(ref, path, since, until),
+           cd: cwd,
+           stderr_to_stdout: false
+         ) do
       {out, 0} -> {:ok, out}
       {_out, code} -> {:error, "git log -p for #{path} failed (#{code})"}
     end

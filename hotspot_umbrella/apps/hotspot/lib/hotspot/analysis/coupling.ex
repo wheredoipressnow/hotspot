@@ -13,20 +13,22 @@ defmodule Hotspot.Analysis.Coupling do
   """
   import Ecto.Query
   alias Hotspot.Repo
+  alias Hotspot.Analysis.Window
   alias Hotspot.Storage.{Commit, FileChange}
 
   @type coupled :: %{path: String.t(), shared_commits: non_neg_integer, coupling: float}
 
   @doc """
   Top files co-changing with `path`, by coupling ratio (desc). `opts`: `:limit`
-  (default 15), `:min_shared` (default 2, drops one-off co-changes as noise).
+  (default 15), `:min_shared` (default 2, drops one-off co-changes as noise),
+  `:since` / `:until` (epoch bounds restricting the commits considered).
   """
   @spec top(String.t(), keyword) :: [coupled]
   def top(path, opts \\ []) do
     limit = Keyword.get(opts, :limit, 15)
     min_shared = Keyword.get(opts, :min_shared, 2)
 
-    # Distinct non-merge commits that touched `path`.
+    # Distinct non-merge commits that touched `path`, within the time window.
     shas =
       from(f in FileChange,
         join: c in Commit,
@@ -35,6 +37,7 @@ defmodule Hotspot.Analysis.Coupling do
         distinct: true,
         select: f.commit_sha
       )
+      |> Window.restrict(Keyword.get(opts, :since), Keyword.get(opts, :until))
 
     denom = Repo.one(from(s in subquery(shas), select: count()))
 
@@ -72,7 +75,14 @@ defmodule Hotspot.Analysis.Coupling do
   def graph(path, opts \\ []) do
     depth = opts |> Keyword.get(:depth, 2) |> clamp(1, 3)
     breadth = Keyword.get(opts, :breadth, 8)
-    top_opts = [limit: breadth, min_shared: Keyword.get(opts, :min_shared, 2)]
+
+    top_opts = [
+      limit: breadth,
+      min_shared: Keyword.get(opts, :min_shared, 2),
+      since: Keyword.get(opts, :since),
+      until: Keyword.get(opts, :until)
+    ]
+
     max_nodes = Keyword.get(opts, :max_nodes, 120)
 
     # `visited` maps path -> depth (also our expansion memo); `edges` maps the

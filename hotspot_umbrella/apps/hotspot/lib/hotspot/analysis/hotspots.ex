@@ -13,7 +13,7 @@ defmodule Hotspot.Analysis.Hotspots do
   """
   import Ecto.Query
   alias Hotspot.Repo
-  alias Hotspot.Analysis.{Recency, Renames, Tracked}
+  alias Hotspot.Analysis.{Recency, Renames, Tracked, Window}
   alias Hotspot.Storage.{Commit, FileChange}
 
   @sorts ~w(churn author_count recency_churn last_changed revisions)
@@ -24,7 +24,9 @@ defmodule Hotspot.Analysis.Hotspots do
           optional(:limit) => pos_integer,
           optional(:path_filter) => String.t() | nil,
           optional(:include_merges) => boolean,
-          optional(:include_removed) => boolean
+          optional(:include_removed) => boolean,
+          optional(:since) => integer | nil,
+          optional(:until) => integer | nil
         }
 
   @doc """
@@ -72,6 +74,7 @@ defmodule Hotspot.Analysis.Hotspots do
         }
       )
       |> maybe_exclude_merges(include_merges)
+      |> Window.restrict(params)
       |> Repo.all()
 
     if include_removed do

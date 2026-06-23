@@ -87,6 +87,14 @@ defmodule Hotspot.Analysis do
   end
 
   @doc """
+  Files and folders for the fuzzy finder. See `Hotspot.Analysis.PathIndex`.
+  Returns `{:error, :no_database}` when no db is open.
+  """
+  def path_index(params \\ %{}) do
+    with_database(fn -> Hotspot.Analysis.PathIndex.list(params) end)
+  end
+
+  @doc """
   Whether the open db can exclude removed (deleted) files, i.e. whether it carries a
   current `tracked_file` snapshot. `false` when no db is open or on an older db without
   that snapshot, in which case `include_removed: false` only folds renames.

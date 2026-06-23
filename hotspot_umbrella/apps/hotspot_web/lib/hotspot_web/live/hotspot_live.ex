@@ -1,13 +1,19 @@
 defmodule HotspotWeb.HotspotLive do
   @moduledoc """
   Circle-packing view of repo hotspots. Owns the visualization parameters (metric,
-  path filter, include-removed, labels) and pushes the nested tree to the
-  `CirclePack` JS hook. Reads only through `Hotspot.Analysis`, never the Repo.
+  color, include-removed, labels) and the shared navigation **scope**, and pushes
+  the nested tree to the `CirclePack` JS hook. Reads only through `Hotspot.Analysis`,
+  never the Repo.
 
-  Layout is a full-height row: a docked **Controls** panel (db selection + options)
-  on the left, the chart filling the middle, and a docked **Top hotspots** panel on
-  the right. Each panel collapses to a thin rail so the chart can reclaim the width;
-  the chart reflows live because its SVG scales to its container.
+  Scope is a single source of truth: a path (`""` is the repo root) held in
+  `current_scope`. Zooming the map emits `scope_changed`; the breadcrumb and
+  folder rows in the list emit `scope_to`. Both narrow the list and scatter to the
+  scoped subtree without re-pushing the (full) tree, which stays loaded client-side.
+
+  Layout is a full-height row: a docked **Controls** panel (db selection + view
+  options) on the left, the chart filling the middle, and a docked **Top hotspots**
+  panel on the right. Each panel collapses to a thin rail so the chart can reclaim
+  the width; the chart reflows live because its SVG scales to its container.
 
   No db is loaded at boot: until one is selected the chart area shows a hint and the
   Controls panel lists the available databases (`Hotspot.Storage`).
@@ -39,6 +45,17 @@ defmodule HotspotWeb.HotspotLive do
   ]
   @top_limit 25
 
+  # Preset analysis windows for the top-bar time-range control. "custom" is added
+  # by the control itself (a from/to date pair); see `parse_time_range/1`.
+  @time_presets [
+    {"All time", "all"},
+    {"Last 12 months", "y1"},
+    {"Last 6 months", "m6"},
+    {"Last 3 months", "m3"},
+    {"Last 30 days", "m1"}
+  ]
+  @seconds_per_day 86_400
+
   @impl true
   def mount(_params, _session, socket) do
     if connected?(socket) do
@@ -56,7 +73,9 @@ defmodule HotspotWeb.HotspotLive do
        metric: "churn",
        color_by: "author_count",
        color_modes: @color_modes,
-       path_filter: "",
+       current_scope: "",
+       # Global analysis window; persists across db switches. See `time_bounds/1`.
+       time_range: :all,
        # Default to excluding removed files when the db can, else include all.
        include_removed: not available,
        removed_filter_available: available,
@@ -70,6 +89,12 @@ defmodule HotspotWeb.HotspotLive do
        hotspots_scope: "files",
        hotspots_sort: "churn",
        hotspots: [],
+       # Fuzzy finder ("go to file/folder"). `path_index` is recomputed whenever the
+       # tree refreshes (db / time-range / include-removed change).
+       path_index: [],
+       palette_open: false,
+       palette_query: "",
+       palette_results: [],
        # File deep-dive overlay (nil = showing the map). Set by clicking a circle,
        # cleared by "Back to map".
        xray: nil,
@@ -108,7 +133,6 @@ defmodule HotspotWeb.HotspotLive do
     |> assign(
       metric: params["metric"] || socket.assigns.metric,
       color_by: params["color_by"] || socket.assigns.color_by,
-      path_filter: params["path_filter"] || socket.assigns.path_filter,
       include_removed: include_removed,
       show_labels: params["show_labels"] == "true"
     )
@@ -125,6 +149,12 @@ defmodule HotspotWeb.HotspotLive do
 
   def handle_event("set_scope", %{"scope" => scope}, socket) do
     {:noreply, socket |> assign(hotspots_scope: scope) |> assign_hotspots()}
+  end
+
+  # Global time-range change: reshapes circle sizes, the list, and the scatter, so a
+  # full refresh (which re-pushes the tree) is needed.
+  def handle_event("set_time_range", params, socket) do
+    {:noreply, socket |> assign(time_range: parse_time_range(params)) |> refresh()}
   end
 
   def handle_event("set_sort", %{"sort" => sort}, socket) do
@@ -186,6 +216,40 @@ defmodule HotspotWeb.HotspotLive do
     {:noreply, assign(socket, extraction: nil)}
   end
 
+  # --- Fuzzy finder ----------------------------------------------------------
+
+  def handle_event("toggle_palette", _params, socket) do
+    open = not socket.assigns.palette_open
+
+    {:noreply,
+     assign(socket,
+       palette_open: open,
+       palette_query: "",
+       palette_results: palette_filter(socket.assigns.path_index, "")
+     )}
+  end
+
+  def handle_event("close_palette", _params, socket) do
+    {:noreply, assign(socket, palette_open: false)}
+  end
+
+  def handle_event("palette_search", %{"q" => q}, socket) do
+    {:noreply,
+     assign(socket,
+       palette_query: q,
+       palette_results: palette_filter(socket.assigns.path_index, q)
+     )}
+  end
+
+  # Selecting mirrors the click grammar: a file opens its X-Ray, a folder sets scope.
+  def handle_event("palette_select", %{"path" => path, "kind" => "folder"}, socket) do
+    handle_event("scope_to", %{"path" => path}, assign(socket, palette_open: false))
+  end
+
+  def handle_event("palette_select", %{"path" => path, "kind" => "file"}, socket) do
+    handle_event("xray", %{"path" => path}, assign(socket, palette_open: false))
+  end
+
   def handle_event("toggle_prefs", _params, socket) do
     {:noreply, update(socket, :prefs_open, &(!&1))}
   end
@@ -194,13 +258,27 @@ defmodule HotspotWeb.HotspotLive do
     {:noreply, update(socket, :hotspots_open, &(!&1))}
   end
 
-  def handle_event("zoom_to", %{"path" => path}, socket) do
-    # The zoom targets the (circle-pack) map, so make it visible first: close any
-    # open X-Ray overlay and leave the scatter. The hook kept its drawing across the
-    # switch (phx-update="ignore"), so the pushed zoom lands without a re-fetch.
+  # The map zoomed (user clicked a folder or the background): adopt the new scope and
+  # re-scope the list + scatter. The map already moved client-side, so no zoom is
+  # pushed back and the (full) tree is not re-fetched.
+  def handle_event("scope_changed", %{"path" => path}, socket) do
     {:noreply,
      socket
-     |> assign(xray: nil, view_mode: "map")
+     |> assign(current_scope: path)
+     |> assign_hotspots()
+     |> assign_scatter()}
+  end
+
+  # Scope set from the breadcrumb or a folder row: adopt it, then drive the map to it.
+  # Make the map visible first (close any X-Ray overlay, leave the scatter); the hook
+  # kept its drawing across the switch (phx-update="ignore"), so the pushed zoom lands
+  # without a re-fetch.
+  def handle_event("scope_to", %{"path" => path}, socket) do
+    {:noreply,
+     socket
+     |> assign(current_scope: path, xray: nil, view_mode: "map")
+     |> assign_hotspots()
+     |> assign_scatter()
      |> push_event("hotspot:zoom", %{path: path})}
   end
 
@@ -212,14 +290,19 @@ defmodule HotspotWeb.HotspotLive do
       repo when is_binary(repo) ->
         # Region history (git) + cross-file coupling (db) in one task; the file's
         # blamed source in a second task so the heatmap can render without waiting
-        # on the (larger) source.
+        # on the (larger) source. Both honor the global time window.
+        %{since: since, until: until} = time_window(socket)
+        history_opts = [since: since, until: until]
+        coupling_opts = [since: since, until: until]
+
         {:noreply,
          socket
          |> assign(
            xray: %{state: :loading, path: path, regions: [], complexity: file_complexity(path)}
          )
          |> start_async({:xray, path}, fn ->
-           {HotspotRunner.Xray.file_history(repo, path), Analysis.coupling(path)}
+           {HotspotRunner.Xray.file_history(repo, path, history_opts),
+            Analysis.coupling(path, coupling_opts)}
          end)
          |> start_async({:xray_source, path}, fn -> HotspotRunner.Xray.file_source(repo, path) end)}
 
@@ -323,10 +406,12 @@ defmodule HotspotWeb.HotspotLive do
 
   # Set the loading overlay and kick off the (db-bound) graph build off-process.
   defp start_graph(socket, path, depth) do
+    %{since: since, until: until} = time_window(socket)
+
     socket
     |> assign(coupling_graph: %{state: :loading, path: path, depth: depth, data: nil})
     |> start_async({:coupling_graph, path, depth}, fn ->
-      Analysis.coupling_graph(path, depth: depth)
+      Analysis.coupling_graph(path, depth: depth, since: since, until: until)
     end)
   end
 
@@ -351,7 +436,7 @@ defmodule HotspotWeb.HotspotLive do
 
   @impl true
   def handle_info({:storage_changed, current}, socket) do
-    # Path filter is repo-specific, so clear it on a db switch; other prefs persist.
+    # Scope is repo-specific, so reset it on a db switch; other prefs persist.
     # Removed-filter availability is per-db, so recompute it and its default.
     available = Analysis.removed_filter_available?()
     complexity = Analysis.complexity_available?()
@@ -361,7 +446,8 @@ defmodule HotspotWeb.HotspotLive do
       assign(socket,
         current: current,
         dbs: Storage.list(),
-        path_filter: "",
+        # Scope is repo-specific, so reset to the repo root on a db switch.
+        current_scope: "",
         # X-Ray paths are repo-specific, so clear it on a db switch.
         xray: nil,
         removed_filter_available: available,
@@ -408,16 +494,35 @@ defmodule HotspotWeb.HotspotLive do
     |> push_tree()
     |> assign_hotspots()
     |> assign_scatter()
+    |> assign_path_index()
+  end
+
+  defp assign_path_index(socket) do
+    params = Map.merge(%{include_removed: socket.assigns.include_removed}, time_window(socket))
+
+    index =
+      case Analysis.path_index(params) do
+        {:error, :no_database} -> []
+        rows -> rows
+      end
+
+    socket
+    |> assign(path_index: index)
+    |> assign(palette_results: palette_filter(index, socket.assigns.palette_query))
   end
 
   defp assign_scatter(%{assigns: %{complexity_available: false}} = socket),
     do: assign(socket, scatter: [])
 
   defp assign_scatter(socket) do
-    params = %{
-      include_removed: socket.assigns.include_removed,
-      path_filter: socket.assigns.path_filter
-    }
+    params =
+      Map.merge(
+        %{
+          include_removed: socket.assigns.include_removed,
+          path_filter: socket.assigns.current_scope
+        },
+        time_window(socket)
+      )
 
     scatter =
       case Analysis.complexity_scatter(params) do
@@ -429,10 +534,9 @@ defmodule HotspotWeb.HotspotLive do
   end
 
   defp push_tree(socket) do
-    params = %{
-      path_filter: socket.assigns.path_filter,
-      include_removed: socket.assigns.include_removed
-    }
+    # Always the full tree: scope is a client-side zoom, not a server-side filter, so
+    # the hook keeps the whole hierarchy loaded and re-roots without a round-trip.
+    params = Map.merge(%{include_removed: socket.assigns.include_removed}, time_window(socket))
 
     case Analysis.tree_for_visualization(params) do
       {:error, :no_database} ->
@@ -464,13 +568,17 @@ defmodule HotspotWeb.HotspotLive do
   defp assign_hotspots(%{assigns: %{current: nil}} = socket), do: assign(socket, hotspots: [])
 
   defp assign_hotspots(socket) do
-    params = %{
-      sort: socket.assigns.hotspots_sort,
-      scope: socket.assigns.hotspots_scope,
-      include_removed: socket.assigns.include_removed,
-      path_filter: socket.assigns.path_filter,
-      limit: @top_limit
-    }
+    params =
+      Map.merge(
+        %{
+          sort: socket.assigns.hotspots_sort,
+          scope: socket.assigns.hotspots_scope,
+          include_removed: socket.assigns.include_removed,
+          path_filter: socket.assigns.current_scope,
+          limit: @top_limit
+        },
+        time_window(socket)
+      )
 
     hotspots =
       case Analysis.ownership(params) do
@@ -494,10 +602,117 @@ defmodule HotspotWeb.HotspotLive do
     Enum.map(rows, &Map.put(&1, :bug_fix_density, Map.get(density, &1.path, 0.0)))
   end
 
+  # --- Time range ------------------------------------------------------------
+
+  defp time_presets, do: @time_presets
+
+  # `:since`/`:until` params for the current window, ready to merge into a query
+  # params map.
+  defp time_window(socket) do
+    {since, until} = time_bounds(socket.assigns.time_range)
+    %{since: since, until: until}
+  end
+
+  # Resolve a stored range to inclusive `{since, until}` epoch bounds; `nil` is open.
+  defp time_bounds(:all), do: {nil, nil}
+  defp time_bounds(:y1), do: {days_ago(365), nil}
+  defp time_bounds(:m6), do: {days_ago(182), nil}
+  defp time_bounds(:m3), do: {days_ago(91), nil}
+  defp time_bounds(:m1), do: {days_ago(30), nil}
+  defp time_bounds({:custom, from, until}), do: {from, until}
+  defp time_bounds(_), do: {nil, nil}
+
+  defp days_ago(n), do: System.os_time(:second) - n * @seconds_per_day
+
+  # Parse the time-range form into a stored range. "custom" carries from/to dates
+  # (start-of-day / end-of-day, UTC); blanks stay open-ended.
+  defp parse_time_range(%{"preset" => "custom"} = params) do
+    {:custom, parse_date(params["from"], :start), parse_date(params["to"], :end)}
+  end
+
+  defp parse_time_range(%{"preset" => preset}), do: preset_atom(preset)
+  defp parse_time_range(_), do: :all
+
+  defp preset_atom("y1"), do: :y1
+  defp preset_atom("m6"), do: :m6
+  defp preset_atom("m3"), do: :m3
+  defp preset_atom("m1"), do: :m1
+  defp preset_atom(_), do: :all
+
+  defp parse_date(date, _edge) when date in [nil, ""], do: nil
+
+  defp parse_date(date, edge) do
+    case Date.from_iso8601(date) do
+      {:ok, d} ->
+        time = if edge == :end, do: ~T[23:59:59], else: ~T[00:00:00]
+        d |> DateTime.new!(time, "Etc/UTC") |> DateTime.to_unix()
+
+      _ ->
+        nil
+    end
+  end
+
+  # The select's option value for the stored range; `{:custom, ...}` -> "custom".
+  defp time_range_key({:custom, _, _}), do: "custom"
+  defp time_range_key(range), do: to_string(range)
+
+  # The from/to date strings to pre-fill the custom inputs, else blanks.
+  defp custom_dates({:custom, from, until}), do: {date_str(from), date_str(until)}
+  defp custom_dates(_), do: {"", ""}
+
+  defp date_str(nil), do: ""
+
+  defp date_str(epoch),
+    do: epoch |> DateTime.from_unix!() |> DateTime.to_date() |> Date.to_iso8601()
+
+  # --- Fuzzy finder ----------------------------------------------------------
+
+  @palette_limit 50
+
+  # Rank index entries against the query. Empty query shows the first N entries; a
+  # substring match ranks above a looser subsequence match; ties break on path length.
+  defp palette_filter(index, query) do
+    case String.trim(query) do
+      "" ->
+        Enum.take(index, @palette_limit)
+
+      q ->
+        q = String.downcase(q)
+
+        index
+        |> Enum.flat_map(fn e ->
+          case fuzzy_score(String.downcase(e.path), q) do
+            nil -> []
+            score -> [{score, e}]
+          end
+        end)
+        |> Enum.sort_by(fn {score, e} -> {score, String.length(e.path)} end)
+        |> Enum.take(@palette_limit)
+        |> Enum.map(&elem(&1, 1))
+    end
+  end
+
+  # Lower is better: a substring match (ranked by its position) beats a subsequence
+  # match; `nil` when the query is not even a subsequence.
+  defp fuzzy_score(path, q) do
+    case :binary.match(path, q) do
+      {pos, _} -> {0, pos}
+      :nomatch -> if subsequence?(path, q), do: {1, 0}, else: nil
+    end
+  end
+
+  defp subsequence?(_path, ""), do: true
+  defp subsequence?("", _q), do: false
+
+  defp subsequence?(<<ch::utf8, prest::binary>>, <<ch::utf8, qrest::binary>>),
+    do: subsequence?(prest, qrest)
+
+  defp subsequence?(<<_::utf8, prest::binary>>, q), do: subsequence?(prest, q)
+
   @impl true
   def render(assigns) do
     ~H"""
-    <div class="h-screen flex overflow-hidden">
+    <div class="h-screen flex flex-col overflow-hidden">
       <.extraction_banner :if={@extraction} extraction={@extraction} />
       <.repo_picker
         :if={@picker_open}
@@ -506,82 +721,90 @@ defmodule HotspotWeb.HotspotLive do
         entries={@picker_entries}
       />
 
-      <.panel open={@prefs_open} side="left" title="Controls" toggle="toggle_prefs">
-        <.controls
-          dbs={@dbs}
-          current={@current}
-          metric={@metric}
-          metrics={@metrics}
-          color_by={@color_by}
-          color_modes={@color_modes}
-          path_filter={@path_filter}
-          include_removed={@include_removed}
-          removed_filter_available={@removed_filter_available}
-          show_labels={@show_labels}
-        />
-      </.panel>
+      <%!-- Captures Ctrl/Cmd+P globally to toggle the fuzzy finder (see the Palette hook). --%>
+      <div id="palette-key" phx-hook="Palette" class="hidden"></div>
+      <.command_palette
+        :if={@palette_open}
+        query={@palette_query}
+        results={@palette_results}
+      />
 
-      <div class="flex-1 relative min-w-0 bg-base-100">
-        <%!-- Map/scatter toggle, shown only when the db carries complexity metrics. --%>
-        <div
-          :if={@current && @complexity_available}
-          class="absolute top-2 left-1/2 -translate-x-1/2 z-10 join shadow"
-        >
-          <button
-            type="button"
-            phx-click="set_view"
-            phx-value-view="map"
-            class={["btn btn-xs join-item", @view_mode == "map" && "btn-active"]}
-          >
-            Map
-          </button>
-          <button
-            type="button"
-            phx-click="set_view"
-            phx-value-view="scatter"
-            class={["btn btn-xs join-item", @view_mode == "scatter" && "btn-active"]}
-          >
-            Scatter
-          </button>
-        </div>
+      <.top_bar dbs={@dbs} current={@current} scope={@current_scope} time_range={@time_range} />
 
-        <%!-- The hook stays mounted across view switches; we only toggle the wrapper's
+      <div class="flex-1 flex overflow-hidden min-h-0">
+        <.panel open={@prefs_open} side="left" title="View" toggle="toggle_prefs">
+          <.controls
+            metric={@metric}
+            metrics={@metrics}
+            color_by={@color_by}
+            color_modes={@color_modes}
+            include_removed={@include_removed}
+            removed_filter_available={@removed_filter_available}
+            show_labels={@show_labels}
+          />
+        </.panel>
+
+        <div class="flex-1 relative min-w-0 bg-base-100">
+          <%!-- Map/scatter toggle, shown only when the db carries complexity metrics. --%>
+          <div
+            :if={@current && @complexity_available}
+            class="absolute top-2 left-1/2 -translate-x-1/2 z-10 join shadow"
+          >
+            <button
+              type="button"
+              phx-click="set_view"
+              phx-value-view="map"
+              class={["btn btn-xs join-item", @view_mode == "map" && "btn-active"]}
+            >
+              Map
+            </button>
+            <button
+              type="button"
+              phx-click="set_view"
+              phx-value-view="scatter"
+              class={["btn btn-xs join-item", @view_mode == "scatter" && "btn-active"]}
+            >
+              Scatter
+            </button>
+          </div>
+
+          <%!-- The hook stays mounted across view switches; we only toggle the wrapper's
         visibility. The class must live on the wrapper, not the hook element: LiveView
         skips attribute patches on a phx-update="ignore" node, so a class toggled there
         would never apply. --%>
-        <div :if={@current} class={["w-full h-full", @view_mode == "scatter" && "hidden"]}>
-          <div id="hotspot-chart" phx-hook="CirclePack" phx-update="ignore" class="w-full h-full">
+          <div :if={@current} class={["w-full h-full", @view_mode == "scatter" && "hidden"]}>
+            <div id="hotspot-chart" phx-hook="CirclePack" phx-update="ignore" class="w-full h-full">
+            </div>
           </div>
+
+          <.scatter_plot :if={@current && @view_mode == "scatter"} points={@scatter} />
+
+          <div :if={is_nil(@current)} class="h-full flex items-center justify-center px-6">
+            <p class="text-sm opacity-60 text-center">
+              ↑ Open a database from the <span class="font-semibold">top bar</span> to see hotspots.
+            </p>
+          </div>
+
+          <%!-- A selected file overlays its deep-dive on top of the (still-mounted) circle pack. --%>
+          <.file_dashboard
+            :if={@current && @xray && @xray.state in [:loading, :ready, :error]}
+            xray={@xray}
+          />
+
+          <%!-- The coupling cloud overlays the X-Ray dashboard when opened. --%>
+          <.coupling_graph_view :if={@current && @coupling_graph} graph={@coupling_graph} />
         </div>
 
-        <.scatter_plot :if={@current && @view_mode == "scatter"} points={@scatter} />
-
-        <div :if={is_nil(@current)} class="h-full flex items-center justify-center px-6">
-          <p class="text-sm opacity-60 text-center">
-            ← Open a database in the <span class="font-semibold">Controls</span>
-            panel to see hotspots.
-          </p>
-        </div>
-
-        <%!-- A selected file overlays its deep-dive on top of the (still-mounted) circle pack. --%>
-        <.file_dashboard
-          :if={@current && @xray && @xray.state in [:loading, :ready, :error]}
-          xray={@xray}
-        />
-
-        <%!-- The coupling cloud overlays the X-Ray dashboard when opened. --%>
-        <.coupling_graph_view :if={@current && @coupling_graph} graph={@coupling_graph} />
+        <.panel open={@hotspots_open} side="right" title="Top hotspots" toggle="toggle_hotspots">
+          <.top_hotspots
+            current={@current}
+            scope={@hotspots_scope}
+            sort={@hotspots_sort}
+            sorts={@sorts}
+            hotspots={@hotspots}
+          />
+        </.panel>
       </div>
-
-      <.panel open={@hotspots_open} side="right" title="Top hotspots" toggle="toggle_hotspots">
-        <.top_hotspots
-          current={@current}
-          scope={@hotspots_scope}
-          sort={@hotspots_sort}
-          sorts={@sorts}
-          hotspots={@hotspots}
-        />
-      </.panel>
     </div>
     """
   end
@@ -936,44 +1159,206 @@ defmodule HotspotWeb.HotspotLive do
   defp chevron("right", :collapse), do: "hero-chevron-double-right"
   defp chevron("right", :expand), do: "hero-chevron-double-left"
 
-  # --- Controls panel body ---------------------------------------------------
+  # --- Top bar ---------------------------------------------------------------
+  # Repository/database management, the scope breadcrumb, and the theme toggle.
 
   attr(:dbs, :list, required: true)
   attr(:current, :string, default: nil)
+  attr(:scope, :string, required: true)
+  attr(:time_range, :any, required: true)
+
+  defp top_bar(assigns) do
+    {from_str, to_str} = custom_dates(assigns.time_range)
+
+    assigns =
+      assign(assigns, preset: time_range_key(assigns.time_range), from: from_str, to: to_str)
+
+    ~H"""
+    <header class="shrink-0 h-12 flex items-center gap-3 px-3 border-b border-base-300 bg-base-200">
+      <span class="font-semibold text-sm whitespace-nowrap">Hotspot</span>
+
+      <form id="db-form" phx-change="open_db" class="shrink-0">
+        <select name="db" class="select select-bordered select-sm" title="Open database">
+          <option value="" disabled selected={is_nil(@current)}>Choose database…</option>
+          <option :for={db <- @dbs} value={db.path} selected={@current == db.path}>
+            {db.name}
+          </option>
+        </select>
+      </form>
+
+      <button type="button" phx-click="open_picker" class="btn btn-sm btn-primary shrink-0">
+        <.icon name="hero-folder-open" class="size-4" /> Open repository…
+      </button>
+
+      <%!-- Breadcrumb of the current scope; clicking a crumb re-roots the map there. --%>
+      <.breadcrumb :if={@current} scope={@scope} />
+
+      <div class="ml-auto flex items-center gap-2 shrink-0">
+        <button
+          :if={@current}
+          type="button"
+          phx-click="toggle_palette"
+          class="btn btn-sm btn-ghost gap-1"
+          title="Go to file or folder"
+        >
+          <.icon name="hero-magnifying-glass" class="size-4" />
+          <kbd class="kbd kbd-sm hidden sm:inline">⌘P</kbd>
+        </button>
+
+        <%!-- Global analysis window. "Custom…" reveals a from/to date pair. --%>
+        <form
+          phx-change="set_time_range"
+          class="flex items-center gap-1 text-xs"
+          title="Analysis time range"
+        >
+          <.icon name="hero-clock" class="size-4 opacity-60" />
+          <select name="preset" class="select select-bordered select-xs">
+            <option :for={{label, value} <- time_presets()} value={value} selected={value == @preset}>
+              {label}
+            </option>
+            <option value="custom" selected={@preset == "custom"}>Custom…</option>
+          </select>
+          <input
+            :if={@preset == "custom"}
+            type="date"
+            name="from"
+            value={@from}
+            class="input input-bordered input-xs"
+          />
+          <input
+            :if={@preset == "custom"}
+            type="date"
+            name="to"
+            value={@to}
+            class="input input-bordered input-xs"
+          />
+        </form>
+
+        <Layouts.theme_toggle />
+      </div>
+    </header>
+    """
+  end
+
+  # --- Scope breadcrumb ------------------------------------------------------
+  # Trail of the current scope path. Each crumb re-roots the map (and the list)
+  # at that ancestor via `scope_to`; the leading "root" crumb resets to `""`.
+
+  attr(:scope, :string, required: true)
+
+  defp breadcrumb(assigns) do
+    assigns = assign(assigns, crumbs: scope_crumbs(assigns.scope))
+
+    ~H"""
+    <nav class="flex items-center gap-1 text-xs min-w-0 overflow-hidden">
+      <button
+        type="button"
+        phx-click="scope_to"
+        phx-value-path=""
+        class={["btn btn-ghost btn-xs px-1", @scope == "" && "btn-active"]}
+        title="Whole repository"
+      >
+        <.icon name="hero-home" class="size-3.5" />
+      </button>
+      <span :for={{label, path} <- @crumbs} class="flex items-center gap-1 min-w-0">
+        <.icon name="hero-chevron-right" class="size-3 opacity-40 shrink-0" />
+        <button
+          type="button"
+          phx-click="scope_to"
+          phx-value-path={path}
+          class={["btn btn-ghost btn-xs px-1 font-mono truncate", path == @scope && "btn-active"]}
+          title={path}
+        >
+          {label}
+        </button>
+      </span>
+    </nav>
+    """
+  end
+
+  # "lib/a/b" -> [{"lib", "lib"}, {"a", "lib/a"}, {"b", "lib/a/b"}]; [] for the root.
+  defp scope_crumbs(""), do: []
+
+  defp scope_crumbs(scope) do
+    scope
+    |> String.split("/")
+    |> Enum.reduce({[], ""}, fn seg, {acc, prefix} ->
+      path = if prefix == "", do: seg, else: prefix <> "/" <> seg
+      {[{seg, path} | acc], path}
+    end)
+    |> elem(0)
+    |> Enum.reverse()
+  end
+
+  # --- Command palette (fuzzy finder) ----------------------------------------
+  # Overlay listing matching files/folders. Selecting a file opens its X-Ray, a
+  # folder sets the scope (same grammar as a map click).
+
+  attr(:query, :string, required: true)
+  attr(:results, :list, required: true)
+
+  defp command_palette(assigns) do
+    ~H"""
+    <div
+      class="fixed inset-0 z-50 flex items-start justify-center pt-[12vh] bg-black/40"
+      phx-window-keydown="close_palette"
+      phx-key="Escape"
+    >
+      <div
+        class="bg-base-100 rounded-lg shadow-xl w-[36rem] max-w-[92vw] max-h-[70vh] flex flex-col"
+        phx-click-away="close_palette"
+      >
+        <form phx-change="palette_search" class="p-2 border-b border-base-300">
+          <input
+            type="text"
+            name="q"
+            value={@query}
+            autocomplete="off"
+            autofocus
+            phx-debounce="80"
+            placeholder="Go to file or folder…"
+            class="input input-bordered input-sm w-full"
+          />
+        </form>
+
+        <ul class="overflow-y-auto p-1">
+          <li :if={@results == []} class="px-3 py-2 text-sm opacity-60">No matches.</li>
+          <li :for={e <- @results}>
+            <button
+              type="button"
+              phx-click="palette_select"
+              phx-value-path={e.path}
+              phx-value-kind={Atom.to_string(e.kind)}
+              class="w-full text-left flex items-center gap-2 px-3 py-1.5 rounded hover:bg-base-200"
+            >
+              <.icon
+                name={if e.kind == :folder, do: "hero-folder", else: "hero-document"}
+                class="size-4 shrink-0 opacity-60"
+              />
+              <span class="font-mono text-sm truncate">{e.path}</span>
+              <span :if={e.kind == :folder} class="ml-auto text-[11px] opacity-40 shrink-0">
+                folder
+              </span>
+            </button>
+          </li>
+        </ul>
+      </div>
+    </div>
+    """
+  end
+
+  # --- Controls panel body ---------------------------------------------------
+
   attr(:metric, :string, required: true)
   attr(:metrics, :list, required: true)
   attr(:color_by, :string, required: true)
   attr(:color_modes, :list, required: true)
-  attr(:path_filter, :string, required: true)
   attr(:include_removed, :boolean, required: true)
   attr(:removed_filter_available, :boolean, required: true)
   attr(:show_labels, :boolean, required: true)
 
   defp controls(assigns) do
     ~H"""
-    <form id="db-form" phx-change="open_db">
-      <label class="flex flex-col gap-1">
-        <span class="text-sm">Database</span>
-        <select name="db" class="select select-bordered select-sm">
-          <option value="" disabled selected={is_nil(@current)}>Choose…</option>
-          <option :for={db <- @dbs} value={db.path} selected={@current == db.path}>
-            {db.name}
-          </option>
-        </select>
-      </label>
-    </form>
-
-    <button type="button" phx-click="open_picker" class="btn btn-sm btn-primary w-full">
-      <.icon name="hero-folder-open" class="size-4" /> Open repository…
-    </button>
-
-    <p :if={@dbs == []} class="text-xs opacity-70">
-      No databases yet. <span class="font-semibold">Open a repository</span>
-      above to extract one, or point <code class="font-mono">HOTSPOT_DB_DIR</code>
-      at a folder of <code class="font-mono">.db</code>
-      files.
-    </p>
-
     <form id="options-form" phx-change="update" class="space-y-3">
       <label class="flex flex-col gap-1">
         <span class="text-sm">Metric (size)</span>
@@ -991,18 +1376,6 @@ defmodule HotspotWeb.HotspotLive do
             {label}
           </option>
         </select>
-      </label>
-
-      <label class="flex flex-col gap-1">
-        <span class="text-sm">Path filter</span>
-        <input
-          type="text"
-          name="path_filter"
-          value={@path_filter}
-          phx-debounce="300"
-          placeholder="e.g. lib/"
-          class="input input-bordered input-sm"
-        />
       </label>
 
       <label
@@ -1038,11 +1411,6 @@ defmodule HotspotWeb.HotspotLive do
         <span class="text-sm">Show labels</span>
       </label>
     </form>
-
-    <div class="pt-2 border-t border-base-300 flex items-center justify-between">
-      <span class="text-sm">Theme</span>
-      <Layouts.theme_toggle />
-    </div>
     """
   end
 
@@ -1311,11 +1679,13 @@ defmodule HotspotWeb.HotspotLive do
 
       <p :if={@hotspots == []} class="text-sm opacity-60">No data.</p>
 
+      <%!-- Click grammar matches the map: a folder row re-roots the scope, a file
+      row opens its X-Ray. The panel's Scope selector decides which kind a row is. --%>
       <ol class="space-y-0.5">
         <li :for={{h, i} <- Enum.with_index(@hotspots, 1)}>
           <button
             type="button"
-            phx-click="zoom_to"
+            phx-click={if @scope == "folders", do: "scope_to", else: "xray"}
             phx-value-path={h.path}
             class="w-full text-left flex gap-2 px-2 py-1.5 rounded hover:bg-base-300"
             title={h.path}
