@@ -56,6 +56,19 @@ defmodule HotspotWeb.HotspotLive do
   ]
   @seconds_per_day 86_400
 
+  # Render-time view preferences for the X-Ray dashboard. They slice data already in
+  # the `@xray` assign (no refetch), so changing one only re-renders. See `xray_controls/1`.
+  @xray_sorts [{"Churn", "churn"}, {"Recency", "recency"}, {"Authors", "authors"}]
+  @xray_region_opts [{"Top 10", "10"}, {"Top 30", "30"}, {"All", "all"}]
+  @xray_commit_opts [{"5", "5"}, {"15", "15"}, {"All", "all"}]
+  @xray_pref_defaults %{
+    sort: "churn",
+    region_limit: 30,
+    commit_limit: 15,
+    hide_unattributed: false,
+    show_source: true
+  }
+
   @impl true
   def mount(_params, _session, socket) do
     if connected?(socket) do
@@ -86,6 +99,9 @@ defmodule HotspotWeb.HotspotLive do
        show_labels: false,
        metrics: metrics_for(complexity),
        sorts: @sorts,
+       xray_sorts: @xray_sorts,
+       xray_region_opts: @xray_region_opts,
+       xray_commit_opts: @xray_commit_opts,
        hotspots_scope: "files",
        hotspots_sort: "churn",
        hotspots: [],
@@ -98,9 +114,15 @@ defmodule HotspotWeb.HotspotLive do
        # File deep-dive overlay (nil = showing the map). Set by clicking a circle,
        # cleared by "Back to map".
        xray: nil,
+       # X-Ray render preferences (sort/limits/toggles). Top-level so they persist as
+       # the user drills from file to file in one session.
+       xray_prefs: default_xray_prefs(),
        # Force-directed coupling "cloud" overlay (nil = closed). Opened from the
        # X-Ray dashboard; re-rooted by clicking a node.
        coupling_graph: nil,
+       # Live force-layout knobs for the coupling cloud (slider-driven). Kept at the
+       # top level so tuning survives re-center, depth changes, and reopening.
+       coupling_params: default_coupling_params(),
        prefs_open: true,
        hotspots_open: true,
        dbs: Storage.list(),
@@ -151,8 +173,7 @@ defmodule HotspotWeb.HotspotLive do
     {:noreply, socket |> assign(hotspots_scope: scope) |> assign_hotspots()}
   end
 
-  # Global time-range change: reshapes circle sizes, the list, and the scatter, so a
-  # full refresh (which re-pushes the tree) is needed.
+  # A new window reshapes circle sizes, the list, and the scatter: full refresh.
   def handle_event("set_time_range", params, socket) do
     {:noreply, socket |> assign(time_range: parse_time_range(params)) |> refresh()}
   end
@@ -258,9 +279,8 @@ defmodule HotspotWeb.HotspotLive do
     {:noreply, update(socket, :hotspots_open, &(!&1))}
   end
 
-  # The map zoomed (user clicked a folder or the background): adopt the new scope and
-  # re-scope the list + scatter. The map already moved client-side, so no zoom is
-  # pushed back and the (full) tree is not re-fetched.
+  # Map already zoomed client-side, so re-scope the list and scatter only: no zoom is
+  # pushed back and the full tree is not re-fetched.
   def handle_event("scope_changed", %{"path" => path}, socket) do
     {:noreply,
      socket
@@ -269,10 +289,8 @@ defmodule HotspotWeb.HotspotLive do
      |> assign_scatter()}
   end
 
-  # Scope set from the breadcrumb or a folder row: adopt it, then drive the map to it.
-  # Make the map visible first (close any X-Ray overlay, leave the scatter); the hook
-  # kept its drawing across the switch (phx-update="ignore"), so the pushed zoom lands
-  # without a re-fetch.
+  # Scope from the breadcrumb or a folder row: adopt it, close any X-Ray, and drive
+  # the map to it.
   def handle_event("scope_to", %{"path" => path}, socket) do
     {:noreply,
      socket
@@ -351,10 +369,34 @@ defmodule HotspotWeb.HotspotLive do
         _params,
         %{assigns: %{coupling_graph: %{state: :ready, data: data}}} = socket
       ) do
-    {:noreply, push_event(socket, "coupling:graph", data)}
+    {:noreply, push_graph(socket, data)}
   end
 
   def handle_event("coupling:ready", _params, socket), do: {:noreply, socket}
+
+  # Slider moved in the "Forces" panel: cast the changed field(s) and push the merged
+  # set to the hook, which re-tunes the live simulation without refetching data.
+  def handle_event("set_coupling_params", params, socket) do
+    merged = merge_coupling_params(socket.assigns.coupling_params, params)
+    {:noreply, socket |> assign(coupling_params: merged) |> push_event("coupling:params", merged)}
+  end
+
+  def handle_event("reset_coupling_params", _params, socket) do
+    defaults = default_coupling_params()
+
+    {:noreply,
+     socket |> assign(coupling_params: defaults) |> push_event("coupling:params", defaults)}
+  end
+
+  # X-Ray controls: pure view preferences over already-fetched data, so re-rendering
+  # the dashboard applies them (no async, no push to the client).
+  def handle_event("set_xray_view", params, socket) do
+    {:noreply, assign(socket, xray_prefs: merge_xray_prefs(socket.assigns.xray_prefs, params))}
+  end
+
+  def handle_event("reset_xray_view", _params, socket) do
+    {:noreply, assign(socket, xray_prefs: default_xray_prefs())}
+  end
 
   @impl true
   # Region history + coupling. Merge (not replace) so a source result that already
@@ -394,7 +436,7 @@ defmodule HotspotWeb.HotspotLive do
         {:noreply,
          socket
          |> assign(coupling_graph: %{cg | state: :ready, data: graph})
-         |> push_event("coupling:graph", graph)}
+         |> push_graph(graph)}
 
       {%{path: ^path, depth: ^depth} = cg, _} ->
         {:noreply, assign(socket, coupling_graph: %{cg | state: :error})}
@@ -433,6 +475,109 @@ defmodule HotspotWeb.HotspotLive do
   # `Analysis.coupling/2` returns `{:error, :no_database}` when no db is open.
   defp coupling_list(rows) when is_list(rows), do: rows
   defp coupling_list(_), do: []
+
+  # --- Coupling-graph force parameters ---------------------------------------
+  # Live layout knobs shared between the "Forces" panel and the JS hook. Each entry
+  # is `{key, default, min, max, step, label}`; the defaults reproduce the baseline
+  # layout. `min`/`max` clamp slider input so an out-of-range value cannot wedge the
+  # simulation.
+  @coupling_param_specs [
+    {:repel, -420, -800, -100, 20, "Repel"},
+    {:center, 1.0, 0.0, 1.0, 0.05, "Center pull"},
+    {:link_strength, 1.0, 0.0, 2.0, 0.1, "Link strength"},
+    {:link_distance, 1.0, 0.3, 2.5, 0.1, "Link distance"},
+    {:node_size, 1.0, 0.5, 2.0, 0.1, "Node size"},
+    {:link_width, 1.0, 0.5, 3.0, 0.1, "Link thickness"}
+  ]
+
+  defp default_coupling_params do
+    Map.new(@coupling_param_specs, fn {key, default, _min, _max, _step, _label} ->
+      {key, default}
+    end)
+  end
+
+  # Cast the changed slider field(s) into the current params, clamped to each spec's
+  # range. A single-slider `phx-change` only carries one key; unknown keys are ignored.
+  defp merge_coupling_params(current, params) do
+    Enum.reduce(@coupling_param_specs, current, fn {key, _default, min, max, _step, _label},
+                                                   acc ->
+      case Map.fetch(params, Atom.to_string(key)) do
+        {:ok, raw} ->
+          case Float.parse(to_string(raw)) do
+            {value, _} -> Map.put(acc, key, value |> max(min) |> min(max))
+            :error -> acc
+          end
+
+        :error ->
+          acc
+      end
+    end)
+  end
+
+  # Push the graph to the hook with the live force params folded in, so a (re)mount or
+  # rebuild initializes the simulation at the current slider values rather than defaults.
+  defp push_graph(socket, graph) do
+    push_event(socket, "coupling:graph", Map.put(graph, :params, socket.assigns.coupling_params))
+  end
+
+  # --- X-Ray view preferences ------------------------------------------------
+
+  defp default_xray_prefs, do: @xray_pref_defaults
+
+  # Cast the whole form back into prefs (a `phx-change` form serializes every field).
+  # Each checkbox sends a hidden "false" companion, so an unchecked box reads false and
+  # a checked one reads true. Absent or unparseable fields keep their current value.
+  defp merge_xray_prefs(current, params) do
+    current
+    |> put_pref(:sort, params["sort"], fn v -> if valid_sort?(v), do: v end)
+    |> put_pref(:region_limit, params["region_limit"], &parse_limit/1)
+    |> put_pref(:commit_limit, params["commit_limit"], &parse_limit/1)
+    |> put_pref(:hide_unattributed, params["hide_unattributed"], &parse_bool/1)
+    |> put_pref(:show_source, params["show_source"], &parse_bool/1)
+  end
+
+  # Apply `cast` to a raw form value and store it under `key`, unless the field is
+  # absent (nil) or the cast rejects it (also nil).
+  defp put_pref(prefs, _key, nil, _cast), do: prefs
+
+  defp put_pref(prefs, key, raw, cast) do
+    case cast.(raw) do
+      nil -> prefs
+      value -> Map.put(prefs, key, value)
+    end
+  end
+
+  defp valid_sort?(value), do: Enum.any?(@xray_sorts, fn {_label, v} -> v == value end)
+
+  defp parse_limit("all"), do: :all
+
+  defp parse_limit(raw) do
+    case Integer.parse(raw) do
+      {n, _} when n > 0 -> n
+      _ -> nil
+    end
+  end
+
+  defp parse_bool("true"), do: true
+  defp parse_bool("false"), do: false
+  defp parse_bool(_), do: nil
+
+  # Re-rank regions by the chosen key. Defaults to churn, the order the runner already
+  # returns, so "churn" is a stable no-op.
+  defp sort_regions(regions, "recency"), do: Enum.sort_by(regions, & &1.recency_churn, :desc)
+  defp sort_regions(regions, "authors"), do: Enum.sort_by(regions, & &1.author_count, :desc)
+  defp sort_regions(regions, _churn), do: Enum.sort_by(regions, & &1.churn, :desc)
+
+  defp take_limit(list, :all), do: list
+  defp take_limit(list, n) when is_integer(n), do: Enum.take(list, n)
+
+  defp drop_unattributed(regions, false), do: regions
+
+  defp drop_unattributed(regions, true),
+    do: Enum.reject(regions, &(&1.name == unattributed_name()))
+
+  defp commits_hidden(_commits, :all), do: 0
+  defp commits_hidden(commits, n) when is_integer(n), do: max(0, length(commits) - n)
 
   @impl true
   def handle_info({:storage_changed, current}, socket) do
@@ -732,8 +877,22 @@ defmodule HotspotWeb.HotspotLive do
       <.top_bar dbs={@dbs} current={@current} scope={@current_scope} time_range={@time_range} />
 
       <div class="flex-1 flex overflow-hidden min-h-0">
-        <.panel open={@prefs_open} side="left" title="View" toggle="toggle_prefs">
+        <.panel
+          open={@prefs_open}
+          side="left"
+          title={view_panel_title(@coupling_graph, @xray)}
+          toggle="toggle_prefs"
+        >
+          <.coupling_controls :if={@coupling_graph} params={@coupling_params} />
+          <.xray_controls
+            :if={is_nil(@coupling_graph) and @xray}
+            prefs={@xray_prefs}
+            sorts={@xray_sorts}
+            region_opts={@xray_region_opts}
+            commit_opts={@xray_commit_opts}
+          />
           <.controls
+            :if={is_nil(@coupling_graph) and is_nil(@xray)}
             metric={@metric}
             metrics={@metrics}
             color_by={@color_by}
@@ -789,6 +948,7 @@ defmodule HotspotWeb.HotspotLive do
           <.file_dashboard
             :if={@current && @xray && @xray.state in [:loading, :ready, :error]}
             xray={@xray}
+            prefs={@xray_prefs}
           />
 
           <%!-- The coupling cloud overlays the X-Ray dashboard when opened. --%>
@@ -815,10 +975,22 @@ defmodule HotspotWeb.HotspotLive do
   # this one changes together with (temporal coupling).
 
   attr(:xray, :map, required: true)
+  attr(:prefs, :map, required: true)
 
   defp file_dashboard(assigns) do
     ready = assigns.xray.state == :ready
-    regions = if ready, do: Enum.take(assigns.xray.regions, 30), else: []
+    prefs = assigns.prefs
+
+    selected =
+      if ready do
+        assigns.xray.regions
+        |> sort_regions(prefs.sort)
+        |> drop_unattributed(prefs.hide_unattributed)
+      else
+        []
+      end
+
+    regions = take_limit(selected, prefs.region_limit)
     maxcell = regions |> Enum.flat_map(& &1.heat) |> Enum.max(fn -> 0 end)
 
     assigns =
@@ -826,7 +998,7 @@ defmodule HotspotWeb.HotspotLive do
         ready: ready,
         regions: regions,
         maxcell: max(maxcell, 1),
-        extra: if(ready, do: length(assigns.xray.regions) - length(regions), else: 0)
+        extra: length(selected) - length(regions)
       )
 
     ~H"""
@@ -864,7 +1036,7 @@ defmodule HotspotWeb.HotspotLive do
         </div>
 
         <div :if={@ready} class="flex flex-col lg:flex-row gap-4 p-4 h-full">
-          <div class="lg:w-[34rem] lg:shrink-0 space-y-5">
+          <div class={["space-y-5", @prefs.show_source && "lg:w-[34rem] lg:shrink-0"]}>
             <div>
               <div class="font-mono text-sm truncate" title={@xray.path}>{@xray.path}</div>
               <div class="text-xs opacity-60 mt-1 flex flex-wrap gap-x-4 gap-y-1">
@@ -928,7 +1100,7 @@ defmodule HotspotWeb.HotspotLive do
 
                       <ul class="pl-48 pr-2 pt-1 pb-2 space-y-0.5">
                         <li
-                          :for={c <- Enum.take(r.commits, 15)}
+                          :for={c <- take_limit(r.commits, @prefs.commit_limit)}
                           class="flex items-center gap-2 text-[11px]"
                         >
                           <span class="font-mono opacity-60 shrink-0">{short_sha(c.sha)}</span>
@@ -938,8 +1110,11 @@ defmodule HotspotWeb.HotspotLive do
                           <span class="opacity-50 shrink-0">{relative_age(c.committed_at)}</span>
                           <span class="opacity-70 shrink-0 tabular-nums">+{c.churn}</span>
                         </li>
-                        <li :if={length(r.commits) > 15} class="text-[11px] opacity-40 pl-1">
-                          + {length(r.commits) - 15} more
+                        <li
+                          :if={commits_hidden(r.commits, @prefs.commit_limit) > 0}
+                          class="text-[11px] opacity-40 pl-1"
+                        >
+                          + {commits_hidden(r.commits, @prefs.commit_limit)} more
                         </li>
                       </ul>
                     </details>
@@ -991,7 +1166,7 @@ defmodule HotspotWeb.HotspotLive do
             </p>
           </div>
 
-          <div class="grow min-w-0 lg:h-full">
+          <div :if={@prefs.show_source} class="grow min-w-0 lg:h-full">
             <.source_pane source={@xray[:source]} />
           </div>
         </div>
@@ -1208,11 +1383,11 @@ defmodule HotspotWeb.HotspotLive do
         <%!-- Global analysis window. "Custom…" reveals a from/to date pair. --%>
         <form
           phx-change="set_time_range"
-          class="flex items-center gap-1 text-xs"
+          class="flex items-center gap-2"
           title="Analysis time range"
         >
-          <.icon name="hero-clock" class="size-4 opacity-60" />
-          <select name="preset" class="select select-bordered select-xs">
+          <.icon name="hero-clock" class="size-5 opacity-70" />
+          <select name="preset" class="select select-bordered select-sm min-w-32">
             <option :for={{label, value} <- time_presets()} value={value} selected={value == @preset}>
               {label}
             </option>
@@ -1223,14 +1398,14 @@ defmodule HotspotWeb.HotspotLive do
             type="date"
             name="from"
             value={@from}
-            class="input input-bordered input-xs"
+            class="input input-bordered input-sm"
           />
           <input
             :if={@preset == "custom"}
             type="date"
             name="to"
             value={@to}
-            class="input input-bordered input-xs"
+            class="input input-bordered input-sm"
           />
         </form>
 
@@ -1412,6 +1587,131 @@ defmodule HotspotWeb.HotspotLive do
       </label>
     </form>
     """
+  end
+
+  # The left panel names the view it controls: the coupling cloud (a child overlay of
+  # X-Ray) wins, then X-Ray, then the default hotspots chart.
+  defp view_panel_title(coupling_graph, _xray) when not is_nil(coupling_graph), do: "Coupling"
+  defp view_panel_title(_coupling_graph, xray) when not is_nil(xray), do: "X-Ray"
+  defp view_panel_title(_coupling_graph, _xray), do: "Hotspots"
+
+  # Render-time controls for the X-Ray dashboard, shown in place of the map controls
+  # while a file is X-Rayed. Every field slices data already in `@xray`, so changes
+  # re-render instantly with no refetch.
+  attr(:prefs, :map, required: true)
+  attr(:sorts, :list, required: true)
+  attr(:region_opts, :list, required: true)
+  attr(:commit_opts, :list, required: true)
+
+  defp xray_controls(assigns) do
+    ~H"""
+    <form id="xray-form" phx-change="set_xray_view" class="space-y-3">
+      <label class="flex flex-col gap-1">
+        <span class="text-sm">Sort regions by</span>
+        <select name="sort" class="select select-bordered select-sm">
+          <option :for={{label, value} <- @sorts} value={value} selected={value == @prefs.sort}>
+            {label}
+          </option>
+        </select>
+      </label>
+
+      <label class="flex flex-col gap-1">
+        <span class="text-sm">Regions shown</span>
+        <select name="region_limit" class="select select-bordered select-sm">
+          <option
+            :for={{label, value} <- @region_opts}
+            value={value}
+            selected={value == to_string(@prefs.region_limit)}
+          >
+            {label}
+          </option>
+        </select>
+      </label>
+
+      <label class="flex flex-col gap-1">
+        <span class="text-sm">Commits per region</span>
+        <select name="commit_limit" class="select select-bordered select-sm">
+          <option
+            :for={{label, value} <- @commit_opts}
+            value={value}
+            selected={value == to_string(@prefs.commit_limit)}
+          >
+            {label}
+          </option>
+        </select>
+      </label>
+
+      <label class="flex items-center gap-2 cursor-pointer">
+        <input type="hidden" name="hide_unattributed" value="false" />
+        <input
+          type="checkbox"
+          name="hide_unattributed"
+          value="true"
+          checked={@prefs.hide_unattributed}
+          class="checkbox checkbox-sm"
+        />
+        <span class="text-sm">Hide unattributed region</span>
+      </label>
+
+      <label class="flex items-center gap-2 cursor-pointer">
+        <input type="hidden" name="show_source" value="false" />
+        <input
+          type="checkbox"
+          name="show_source"
+          value="true"
+          checked={@prefs.show_source}
+          class="checkbox checkbox-sm"
+        />
+        <span class="text-sm">Show source pane</span>
+      </label>
+
+      <button type="button" phx-click="reset_xray_view" class="btn btn-sm btn-outline w-full">
+        Reset
+      </button>
+    </form>
+    """
+  end
+
+  # Live force-layout sliders for the coupling cloud, shown in place of the map
+  # controls while the graph is open. Each change pushes to the `CouplingGraph` hook,
+  # which re-tunes the running simulation without refetching (positions are kept).
+  attr(:params, :map, required: true)
+
+  defp coupling_controls(assigns) do
+    assigns = assign(assigns, :specs, @coupling_param_specs)
+
+    ~H"""
+    <form id="coupling-form" phx-change="set_coupling_params" class="space-y-3">
+      <label :for={{key, _default, min, max, step, label} <- @specs} class="flex flex-col gap-1">
+        <span class="text-sm flex items-center justify-between gap-2">
+          {label}
+          <span class="opacity-50 font-mono text-xs">{fmt_param(@params[key])}</span>
+        </span>
+        <input
+          type="range"
+          name={key}
+          min={min}
+          max={max}
+          step={step}
+          value={@params[key]}
+          class="range range-xs"
+        />
+      </label>
+
+      <button type="button" phx-click="reset_coupling_params" class="btn btn-sm btn-outline w-full">
+        Reset
+      </button>
+    </form>
+    """
+  end
+
+  # Compact slider readout: drop a trailing ".0" but keep real fractional values.
+  defp fmt_param(value) when is_integer(value), do: Integer.to_string(value)
+
+  defp fmt_param(value) when is_float(value) do
+    if value == Float.round(value),
+      do: value |> trunc() |> Integer.to_string(),
+      else: :erlang.float_to_binary(value, decimals: 2)
   end
 
   # Server-rendered hotspot scatter: x = revisions (change frequency), y = indentation

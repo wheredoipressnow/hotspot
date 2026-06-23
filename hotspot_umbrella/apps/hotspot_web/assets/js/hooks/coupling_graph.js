@@ -12,6 +12,18 @@ const R_MIN = 5
 const R_MAX = 16
 const LABEL_MIN_DEGREE = 3 // standing labels for hubs; everything else is hover-only
 
+// Tunable layout knobs, surfaced as sliders in the "Forces" panel. The server is
+// the source of truth and ships these inside the graph payload; these defaults are
+// only the fallback when a payload omits them and reproduce the baseline layout.
+const PARAM_DEFAULTS = {
+  repel: -420, // forceManyBody strength (more negative = more spread)
+  center: 1, // forceCenter strength (recenter pull per tick)
+  link_strength: 1, // multiplier on the per-edge spring strength
+  link_distance: 1, // multiplier on the per-edge spring rest length
+  node_size: 1, // multiplier on circle radius
+  link_width: 1, // multiplier on edge stroke width
+}
+
 // Force-directed "cloud" of a file's temporal-coupling neighbourhood. Nodes are
 // files; an edge means the two change together; node color ramps with `degree`
 // (how often a file shows up as a coupling target: a hub runs hot). Data arrives
@@ -42,6 +54,7 @@ export const CouplingGraph = {
     this.tip = makeTooltip()
 
     this.handleEvent("coupling:graph", (graph) => this.draw(graph))
+    this.handleEvent("coupling:params", (params) => this.applyParams(params))
 
     this.onTheme = () => this.applyTheme()
     window.addEventListener("phx:set-theme", this.onTheme)
@@ -56,13 +69,14 @@ export const CouplingGraph = {
     window.removeEventListener("phx:set-theme", this.onTheme)
   },
 
-  draw({ root, nodes, edges }) {
+  draw({ root, nodes, edges, params }) {
     this.sim?.stop()
     this.links.replaceChildren()
     this.nodes.replaceChildren()
     this.labels.replaceChildren()
     if (!nodes || nodes.length === 0) return
 
+    this.params = params || PARAM_DEFAULTS
     this.root = root
     // d3-force mutates the data it's given, so hand it fresh copies and key links
     // by id (the server sends source/target as paths).
@@ -77,12 +91,13 @@ export const CouplingGraph = {
     const chrome = themeChrome()
     this.svg.style.setProperty("--cg-hover", chrome.hover)
 
-    const radius = (n) => (n.id === root ? R_MAX + 4 : R_MIN + (R_MAX - R_MIN) * (n.degree / maxDeg))
+    this.maxDeg = maxDeg
+    const radius = (n) => this.radiusFor(n)
 
     for (const link of links) {
       const line = document.createElementNS(SVGNS, "line")
       line.setAttribute("stroke", chrome.link)
-      line.setAttribute("stroke-width", 1 + link.weight * 2)
+      line.setAttribute("stroke-width", this.linkWidthFor(link))
       link._line = line
       this.links.appendChild(line)
     }
@@ -115,18 +130,21 @@ export const CouplingGraph = {
     this.data = data
     this.linkData = links
 
+    const p = this.params
+    this.chargeForce = forceManyBody().strength(p.repel)
+    this.linkForce = forceLink(links)
+      .id((d) => d.id)
+      // Stronger coupling => shorter spring => closer together.
+      .distance((l) => (60 + (1 - l.weight) * 160) * this.params.link_distance)
+      .strength((l) => (0.2 + l.weight * 0.6) * this.params.link_strength)
+    this.centerForce = forceCenter(SIZE / 2, SIZE / 2).strength(p.center)
+    this.collideForce = forceCollide().radius((n) => this.radiusFor(n) + 12)
+
     this.sim = forceSimulation(data)
-      .force("charge", forceManyBody().strength(-260))
-      .force(
-        "link",
-        forceLink(links)
-          .id((d) => d.id)
-          // Stronger coupling => shorter spring => closer together.
-          .distance((l) => 40 + (1 - l.weight) * 140)
-          .strength((l) => 0.2 + l.weight * 0.6),
-      )
-      .force("center", forceCenter(SIZE / 2, SIZE / 2))
-      .force("collide", forceCollide().radius((n) => radius(n) + 4))
+      .force("charge", this.chargeForce)
+      .force("link", this.linkForce)
+      .force("center", this.centerForce)
+      .force("collide", this.collideForce)
       .on("tick", () => this.tick())
 
     // Pin the root near the middle so the cloud spreads around it.
@@ -152,6 +170,31 @@ export const CouplingGraph = {
         n._label.setAttribute("y", n.y - parseFloat(n._circle.getAttribute("r")) - 7)
       }
     }
+  },
+
+  radiusFor(n) {
+    const base = n.id === this.root ? R_MAX + 4 : R_MIN + (R_MAX - R_MIN) * (n.degree / this.maxDeg)
+    return base * this.params.node_size
+  },
+
+  linkWidthFor(link) {
+    return (1 + link.weight * 2) * this.params.link_width
+  },
+
+  // Re-tune the live simulation from the "Forces" panel without refetching data, so
+  // node positions are kept and only the forces (and circle/edge sizing) change.
+  applyParams(params) {
+    if (!this.sim) return
+    this.params = params
+    this.chargeForce.strength(params.repel)
+    this.centerForce.strength(params.center)
+    this.linkForce
+      .distance((l) => (60 + (1 - l.weight) * 160) * params.link_distance)
+      .strength((l) => (0.2 + l.weight * 0.6) * params.link_strength)
+    this.collideForce.radius((n) => this.radiusFor(n) + 12)
+    for (const n of this.data) n._circle.setAttribute("r", this.radiusFor(n))
+    for (const l of this.linkData) l._line.setAttribute("stroke-width", this.linkWidthFor(l))
+    this.sim.alpha(0.3).restart()
   },
 
   // Pointer drag to reposition a node; releasing unpins it (except the root, which
