@@ -1,5 +1,7 @@
 # Git Hotspot Analyzer
 
+[![CI](https://github.com/wheredoipressnow/hotspot/actions/workflows/ci.yml/badge.svg)](https://github.com/wheredoipressnow/hotspot/actions/workflows/ci.yml)
+
 Analyzes a Git repository's history to surface the files that change most
 (hotspots) and shows them as an interactive circle-packing visualization.
 
