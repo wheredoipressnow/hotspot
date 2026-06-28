@@ -3,7 +3,7 @@ defmodule Mix.Tasks.Hotspot.Extract do
 
   @moduledoc """
   Extract a repository's git history into its per-repo SQLite database (under
-  `$XDG_DATA_HOME/hotspot`). Replaces the TypeScript POC's `pnpm extract`.
+  `$XDG_DATA_HOME/hotspot`).
 
       mix hotspot.extract [REPO_PATH] [--ref REF] [--force]
 
