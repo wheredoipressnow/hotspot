@@ -15,12 +15,15 @@ defmodule Hotspot.Analysis.Tracked do
   def available? do
     meta =
       from(m in Meta, where: m.key in ["tracked_sha", "last_sha"], select: {m.key, m.value})
-      |> Repo.all()
+      |> repo().all()
       |> Map.new()
 
     case meta do
-      %{"tracked_sha" => sha, "last_sha" => sha} when is_binary(sha) -> Repo.exists?(TrackedFile)
-      _ -> false
+      %{"tracked_sha" => sha, "last_sha" => sha} when is_binary(sha) ->
+        repo().exists?(TrackedFile)
+
+      _ ->
+        false
     end
   rescue
     # tracked_file (or the query) missing on an older db.
@@ -30,7 +33,7 @@ defmodule Hotspot.Analysis.Tracked do
   @doc "MapSet of paths currently present at the extracted ref."
   @spec set() :: MapSet.t(String.t())
   def set do
-    TrackedFile |> select([t], t.path) |> Repo.all() |> MapSet.new()
+    TrackedFile |> select([t], t.path) |> repo().all() |> MapSet.new()
   rescue
     _ -> MapSet.new()
   end
@@ -49,4 +52,6 @@ defmodule Hotspot.Analysis.Tracked do
       rows
     end
   end
+
+  defp repo, do: Application.get_env(:hotspot, :repo, Repo)
 end

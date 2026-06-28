@@ -1,12 +1,12 @@
 defmodule Hotspot.AnalysisCouplingTest do
-  @moduledoc """
-  Structural tests against the real runner-produced fixture db (read-only), like
-  `Hotspot.AnalysisTest`: invariants that survive a re-extraction, not exact ratios
-  (those are covered by the pure `HotspotRunner.XrayTest`).
-  """
-  use ExUnit.Case, async: false
+  use Hotspot.IntegrationCase
 
   alias Hotspot.Analysis
+
+  setup do
+    seed_coupling_repo!()
+    :ok
+  end
 
   # The most-changed file is the most likely to have co-changed with others.
   defp busiest_path do

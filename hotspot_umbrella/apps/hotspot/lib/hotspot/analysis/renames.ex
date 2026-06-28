@@ -16,7 +16,7 @@ defmodule Hotspot.Analysis.Renames do
   def map do
     RenameEdge
     |> select([r], {r.old_path, r.new_path})
-    |> Repo.all()
+    |> repo().all()
     |> Map.new()
   end
 
@@ -38,4 +38,6 @@ defmodule Hotspot.Analysis.Renames do
           else: resolve(rename, next, MapSet.put(seen, path))
     end
   end
+
+  defp repo, do: Application.get_env(:hotspot, :repo, Repo)
 end

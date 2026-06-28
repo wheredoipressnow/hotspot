@@ -6,7 +6,7 @@ defmodule HotspotRunner.Extractor do
   tracked files.
   """
 
-  alias HotspotRunner.{DbPath, Git, Parser, TreeScan, Writer}
+  alias HotspotRunner.{DbPath, Git, Parser, TreeScan}
 
   # Commits per transaction.
   @batch_size 1000
@@ -33,17 +33,17 @@ defmodule HotspotRunner.Extractor do
     force = Keyword.get(opts, :force, false)
     on_progress = Keyword.get(opts, :on_progress, fn _ -> :ok end)
 
-    toplevel = Git.toplevel(repo_path)
-    tip = Git.tip_sha(toplevel, ref)
-    db_path = DbPath.path(toplevel)
+    toplevel = git().toplevel(repo_path)
+    tip = git().tip_sha(toplevel, ref)
+    db_path = DbPath.file_path(toplevel)
 
-    writer = Writer.open(db_path)
+    writer = store().open(db_path)
 
     try do
-      Writer.set_meta(writer, "repo_path", toplevel)
-      Writer.set_meta(writer, "ref", ref)
+      store().set_meta(writer, "repo_path", toplevel)
+      store().set_meta(writer, "ref", ref)
 
-      last = Writer.get_meta(writer, "last_sha")
+      last = store().get_meta(writer, "last_sha")
       incremental = not force and not is_nil(last)
 
       args =
@@ -51,15 +51,15 @@ defmodule HotspotRunner.Extractor do
           do: Git.incremental_log_args(ref, last),
           else: Git.full_log_args(ref)
 
-      port = Git.open_log(toplevel, args)
+      port = git().open_log(toplevel, args)
 
       case consume(port, writer, on_progress) do
         {:ok, total} ->
           # Pin to the exact tip we extracted to, then snapshot tracked files
           # with their current size + indentation metrics.
-          Writer.set_meta(writer, "last_sha", tip)
+          store().set_meta(writer, "last_sha", tip)
           tracked = TreeScan.scan(toplevel, tip)
-          Writer.replace_tracked_files(writer, tracked, tip)
+          store().replace_tracked_files(writer, tracked, tip)
 
           {:ok,
            %{
@@ -75,7 +75,7 @@ defmodule HotspotRunner.Extractor do
           {:error, reason}
       end
     after
-      Writer.close(writer)
+      store().close(writer)
     end
   end
 
@@ -83,16 +83,16 @@ defmodule HotspotRunner.Extractor do
   @spec stale?(String.t(), keyword()) :: boolean()
   def stale?(repo_path, opts \\ []) do
     ref = Keyword.get(opts, :ref, "HEAD")
-    toplevel = Git.toplevel(repo_path)
-    tip = Git.tip_sha(toplevel, ref)
-    db_path = DbPath.path(toplevel)
+    toplevel = git().toplevel(repo_path)
+    tip = git().tip_sha(toplevel, ref)
+    db_path = DbPath.file_path(toplevel)
 
-    writer = Writer.open(db_path)
+    writer = store().open(db_path)
 
     try do
-      Writer.get_meta(writer, "last_sha") != tip
+      store().get_meta(writer, "last_sha") != tip
     after
-      Writer.close(writer)
+      store().close(writer)
     end
   end
 
@@ -124,7 +124,7 @@ defmodule HotspotRunner.Extractor do
   defp flush(writer, pending, total, force, on_progress) do
     if length(pending) >= @batch_size or (force and pending != []) do
       {batch, rest} = Enum.split(pending, @batch_size)
-      Writer.write_batch(writer, batch)
+      store().write_batch(writer, batch)
       total = total + length(batch)
       on_progress.(total)
       flush(writer, rest, total, force, on_progress)
@@ -132,4 +132,7 @@ defmodule HotspotRunner.Extractor do
       {pending, total}
     end
   end
+
+  defp git, do: Application.get_env(:hotspot_runner, :git, Git)
+  defp store, do: Application.get_env(:hotspot_runner, :store, HotspotRunner.Writer)
 end

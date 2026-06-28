@@ -9,7 +9,6 @@ defmodule Hotspot.Analysis do
   missing Repo pool.
   """
   import Ecto.Query
-  alias Hotspot.Repo
   alias Hotspot.Storage.{Commit, FileChange, Meta, RenameEdge}
 
   @doc """
@@ -130,7 +129,7 @@ defmodule Hotspot.Analysis do
   """
   def repo_path do
     with_database(fn ->
-      Repo.one(from(m in Meta, where: m.key == "repo_path", select: m.value))
+      repo().one(from(m in Meta, where: m.key == "repo_path", select: m.value))
     end)
   end
 
@@ -141,17 +140,17 @@ defmodule Hotspot.Analysis do
   def repo_stats do
     with_database(fn ->
       %{
-        commits: Repo.aggregate(Commit, :count, :sha),
-        file_changes: Repo.aggregate(FileChange, :count, :path),
-        renames: Repo.aggregate(RenameEdge, :count, :new_path),
-        last_sha: Repo.one(from(m in Meta, where: m.key == "last_sha", select: m.value))
+        commits: repo().aggregate(Commit, :count, :sha),
+        file_changes: repo().aggregate(FileChange, :count, :path),
+        renames: repo().aggregate(RenameEdge, :count, :new_path),
+        last_sha: repo().one(from(m in Meta, where: m.key == "last_sha", select: m.value))
       }
     end)
   end
 
   # Stored `meta('schema_version')` as an integer; 1 when absent (predates the key).
   defp schema_version do
-    case Repo.one(from(m in Meta, where: m.key == "schema_version", select: m.value)) do
+    case repo().one(from(m in Meta, where: m.key == "schema_version", select: m.value)) do
       nil -> 1
       value -> String.to_integer(value)
     end
@@ -160,6 +159,9 @@ defmodule Hotspot.Analysis do
   end
 
   defp with_database(fun) do
-    if Hotspot.Storage.loaded?(), do: fun.(), else: {:error, :no_database}
+    if storage().loaded?(), do: fun.(), else: {:error, :no_database}
   end
+
+  defp repo, do: Application.get_env(:hotspot, :repo, Hotspot.Repo)
+  defp storage, do: Application.get_env(:hotspot, :storage, Hotspot.Storage)
 end

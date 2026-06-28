@@ -76,7 +76,7 @@ defmodule HotspotWeb.HotspotLive do
   @impl true
   def mount(_params, _session, socket) do
     if connected?(socket) do
-      Phoenix.PubSub.subscribe(Hotspot.PubSub, Storage.topic())
+      Phoenix.PubSub.subscribe(Hotspot.PubSub, storage().topic())
       Phoenix.PubSub.subscribe(Hotspot.PubSub, HotspotRunner.Job.topic())
     end
 
@@ -129,8 +129,8 @@ defmodule HotspotWeb.HotspotLive do
        coupling_params: default_coupling_params(),
        prefs_open: true,
        hotspots_open: true,
-       dbs: Storage.list(),
-       current: Storage.current(),
+       dbs: storage().list(),
+       current: storage().current(),
        # Repository picker + background extraction.
        picker_root: root,
        picker_open: false,
@@ -189,7 +189,7 @@ defmodule HotspotWeb.HotspotLive do
   def handle_event("open_db", %{"db" => ""}, socket), do: {:noreply, socket}
 
   def handle_event("open_db", %{"db" => path}, socket) do
-    Storage.open(path)
+    storage().open(path)
     {:noreply, socket}
   end
 
@@ -594,7 +594,7 @@ defmodule HotspotWeb.HotspotLive do
     socket =
       assign(socket,
         current: current,
-        dbs: Storage.list(),
+        dbs: storage().list(),
         # Scope is repo-specific, so reset to the repo root on a db switch.
         current_scope: "",
         # X-Ray paths are repo-specific, so clear it on a db switch.
@@ -1402,6 +1402,7 @@ defmodule HotspotWeb.HotspotLive do
 
         <%!-- Global analysis window. "Custom…" reveals a from/to date pair. --%>
         <form
+          id="time-range-form"
           phx-change="set_time_range"
           class="flex items-center gap-2"
           title="Analysis time range"
@@ -2299,4 +2300,6 @@ defmodule HotspotWeb.HotspotLive do
         []
     end
   end
+
+  defp storage, do: Application.get_env(:hotspot, :storage, Storage)
 end

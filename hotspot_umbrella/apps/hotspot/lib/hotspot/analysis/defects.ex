@@ -74,7 +74,7 @@ defmodule Hotspot.Analysis.Defects do
       )
       |> maybe_exclude_merges(include_merges)
       |> Window.restrict(params)
-      |> Repo.all()
+      |> repo().all()
 
     rows
     |> fold_renames(include_removed)
@@ -117,4 +117,6 @@ defmodule Hotspot.Analysis.Defects do
 
   defp ratio(_n, 0), do: 0.0
   defp ratio(n, total), do: n / total
+
+  defp repo, do: Application.get_env(:hotspot, :repo, Repo)
 end

@@ -30,7 +30,7 @@ defmodule Hotspot.Analysis.PathIndex do
         select: f.path
       )
       |> Window.restrict(params)
-      |> Repo.all()
+      |> repo().all()
       |> resolve(include_removed)
 
     folders = files |> Enum.flat_map(&ancestors/1) |> Enum.uniq()
@@ -60,4 +60,6 @@ defmodule Hotspot.Analysis.PathIndex do
     |> Enum.drop(-1)
     |> Enum.scan(&"#{&2}/#{&1}")
   end
+
+  defp repo, do: Application.get_env(:hotspot, :repo, Repo)
 end

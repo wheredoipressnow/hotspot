@@ -39,7 +39,7 @@ defmodule Hotspot.Analysis.Coupling do
       )
       |> Window.restrict(Keyword.get(opts, :since), Keyword.get(opts, :until))
 
-    denom = Repo.one(from(s in subquery(shas), select: count()))
+    denom = repo().one(from(s in subquery(shas), select: count()))
 
     if denom in [nil, 0] do
       []
@@ -49,7 +49,7 @@ defmodule Hotspot.Analysis.Coupling do
         group_by: f.path,
         select: %{path: f.path, shared_commits: count(f.commit_sha, :distinct)}
       )
-      |> Repo.all()
+      |> repo().all()
       |> Enum.filter(&(&1.shared_commits >= min_shared))
       |> Enum.map(&Map.put(&1, :coupling, Float.round(&1.shared_commits / denom, 2)))
       |> Enum.sort_by(&{&1.coupling, &1.shared_commits}, :desc)
@@ -190,4 +190,6 @@ defmodule Hotspot.Analysis.Coupling do
   defp edge_key(a, b), do: {b, a}
 
   defp clamp(n, lo, hi), do: n |> max(lo) |> min(hi)
+
+  defp repo, do: Application.get_env(:hotspot, :repo, Repo)
 end

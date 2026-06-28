@@ -23,9 +23,14 @@ defmodule HotspotRunner.DbPath do
   """
   @spec path(String.t()) :: String.t()
   def path(toplevel) do
-    d = dir()
-    File.mkdir_p!(d)
-    Path.join(d, "#{name(toplevel)}-#{short_hash(toplevel)}.db")
+    File.mkdir_p!(dir())
+    file_path(toplevel)
+  end
+
+  @doc "Absolute db path for `toplevel` without creating the directory, unlike `path/1`."
+  @spec file_path(String.t()) :: String.t()
+  def file_path(toplevel) do
+    Path.join(dir(), "#{name(toplevel)}-#{short_hash(toplevel)}.db")
   end
 
   defp name(toplevel) do

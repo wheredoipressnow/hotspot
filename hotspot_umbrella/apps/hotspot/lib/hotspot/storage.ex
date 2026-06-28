@@ -15,6 +15,8 @@ defmodule Hotspot.Storage do
   """
   use GenServer
 
+  @behaviour Hotspot.Storage.Behaviour
+
   require Logger
 
   @topic "storage"
@@ -28,18 +30,22 @@ defmodule Hotspot.Storage do
   end
 
   @doc "PubSub topic broadcasting `{:storage_changed, current_path | nil}`."
+  @impl Hotspot.Storage.Behaviour
   def topic, do: @topic
 
   @doc "Available `.db` files in the configured directory, sorted by name."
   @spec list() :: [%{name: String.t(), path: String.t(), size: non_neg_integer()}]
+  @impl Hotspot.Storage.Behaviour
   def list, do: GenServer.call(__MODULE__, :list)
 
   @doc "Absolute path of the currently open db, or `nil`."
   @spec current() :: String.t() | nil
+  @impl Hotspot.Storage.Behaviour
   def current, do: GenServer.call(__MODULE__, :current)
 
   @doc "Whether a db is currently open (the pool is running)."
   @spec loaded?() :: boolean()
+  @impl Hotspot.Storage.Behaviour
   def loaded?, do: current() != nil
 
   @doc """
@@ -47,10 +53,12 @@ defmodule Hotspot.Storage do
   if one is already open. Returns `:ok` or `{:error, reason}`.
   """
   @spec open(String.t()) :: :ok | {:error, term()}
+  @impl Hotspot.Storage.Behaviour
   def open(path), do: GenServer.call(__MODULE__, {:open, path})
 
   @doc "Close the current db and tear down the pool."
   @spec close() :: :ok
+  @impl Hotspot.Storage.Behaviour
   def close, do: GenServer.call(__MODULE__, :close)
 
   ## Server callbacks

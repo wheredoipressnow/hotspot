@@ -64,7 +64,7 @@ defmodule HotspotRunner.Xray do
     since = Keyword.get(opts, :since)
     until = Keyword.get(opts, :until)
 
-    case Git.file_log(repo_path, ref, path, since, until) do
+    case git().file_log(repo_path, ref, path, since, until) do
       {:ok, output} -> {:ok, output |> XrayParser.parse() |> analyze(opts)}
       {:error, _} = error -> error
     end
@@ -80,7 +80,7 @@ defmodule HotspotRunner.Xray do
   def file_source(repo_path, path, opts \\ []) do
     ref = Keyword.get(opts, :ref, "HEAD")
 
-    case Git.blame(repo_path, ref, path) do
+    case git().blame(repo_path, ref, path) do
       {:ok, output} ->
         lines = Blame.parse(output)
         {:ok, %{lines: Enum.take(lines, @source_line_cap), total: length(lines)}}
@@ -223,4 +223,6 @@ defmodule HotspotRunner.Xray do
 
   defp ratio(_num, 0), do: 0.0
   defp ratio(num, den), do: Float.round(num / den, 2)
+
+  defp git, do: Application.get_env(:hotspot_runner, :git, Git)
 end

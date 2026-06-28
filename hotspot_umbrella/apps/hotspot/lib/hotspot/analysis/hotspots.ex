@@ -75,7 +75,7 @@ defmodule Hotspot.Analysis.Hotspots do
       )
       |> maybe_exclude_merges(include_merges)
       |> Window.restrict(params)
-      |> Repo.all()
+      |> repo().all()
 
     if include_removed do
       rows
@@ -113,4 +113,6 @@ defmodule Hotspot.Analysis.Hotspots do
     |> Enum.drop(-1)
     |> Enum.scan(&"#{&2}/#{&1}")
   end
+
+  defp repo, do: Application.get_env(:hotspot, :repo, Repo)
 end

@@ -1,4 +1,5 @@
-# Tests tagged `:git` build throwaway repos and require the `git` binary. They
-# are excluded by default so CI stays green without git; run them explicitly with
-# `mix test --include git`.
-ExUnit.start(exclude: [:git])
+# Opt-in tests are excluded by default; run them with `mix test --include git --include integration`.
+ExUnit.start(exclude: [:git, :integration])
+
+Mox.defmock(HotspotRunner.GitMock, for: HotspotRunner.Git)
+Mox.defmock(HotspotRunner.StoreMock, for: HotspotRunner.Writer)

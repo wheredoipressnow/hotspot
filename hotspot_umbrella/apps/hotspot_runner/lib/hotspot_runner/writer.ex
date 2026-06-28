@@ -64,9 +64,18 @@ defmodule HotspotRunner.Writer do
 
   @type t :: %__MODULE__{conn: term(), stmts: map()}
 
+  @callback open(path :: String.t()) :: t()
+  @callback close(writer :: t()) :: :ok
+  @callback write_batch(writer :: t(), commits :: [map()]) :: :ok
+  @callback replace_tracked_files(writer :: t(), files :: [map()], sha :: String.t()) :: :ok
+  @callback get_meta(writer :: t(), key :: String.t()) :: String.t() | nil
+  @callback set_meta(writer :: t(), key :: String.t(), value :: String.t()) :: :ok
+  @callback summary(writer :: t()) :: map()
+
   @doc "Open (or create) the db at `path`, apply pragmas, ensure schema, prepare statements."
   @spec open(String.t()) :: t()
   def open(path) do
+    if path != ":memory:", do: File.mkdir_p!(Path.dirname(path))
     {:ok, conn} = Sqlite3.open(path)
     :ok = Sqlite3.execute(conn, "PRAGMA journal_mode = WAL;")
     :ok = Sqlite3.execute(conn, "PRAGMA synchronous = NORMAL;")

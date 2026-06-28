@@ -21,8 +21,8 @@ defmodule HotspotRunner.TreeScan do
   @doc "Metric entries for every blob tracked at `ref`."
   @spec scan(String.t(), String.t()) :: [entry]
   def scan(cwd, ref) do
-    blobs = Git.tree_blobs(cwd, ref)
-    contents = Git.read_blobs(cwd, Enum.map(blobs, fn {sha, _path} -> sha end))
+    blobs = git().tree_blobs(cwd, ref)
+    contents = git().read_blobs(cwd, Enum.map(blobs, fn {sha, _path} -> sha end))
 
     Enum.map(blobs, fn {sha, path} ->
       entry(path, Map.get(contents, sha))
@@ -41,4 +41,6 @@ defmodule HotspotRunner.TreeScan do
   end
 
   defp entry(path, nil), do: %{path: path, loc: nil, indent_total: nil, indent_max: nil}
+
+  defp git, do: Application.get_env(:hotspot_runner, :git, Git)
 end

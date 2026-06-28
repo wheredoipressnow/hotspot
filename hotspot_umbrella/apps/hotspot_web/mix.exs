@@ -60,7 +60,8 @@ defmodule HotspotWeb.MixProject do
       {:hotspot, in_umbrella: true},
       {:hotspot_runner, in_umbrella: true},
       {:jason, "~> 1.2"},
-      {:bandit, "~> 1.5"}
+      {:bandit, "~> 1.5"},
+      {:mox, "~> 1.0", only: :test}
     ]
   end
 

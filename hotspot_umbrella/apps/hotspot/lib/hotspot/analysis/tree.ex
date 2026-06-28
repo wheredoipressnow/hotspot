@@ -105,7 +105,7 @@ defmodule Hotspot.Analysis.Tree do
     )
     |> maybe_exclude_merges(include_merges)
     |> Window.restrict(params)
-    |> Repo.all()
+    |> repo().all()
   end
 
   defp maybe_exclude_merges(query, true), do: query
@@ -159,4 +159,6 @@ defmodule Hotspot.Analysis.Tree do
       end
     end)
   end
+
+  defp repo, do: Application.get_env(:hotspot, :repo, Repo)
 end

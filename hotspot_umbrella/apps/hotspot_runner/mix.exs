@@ -34,7 +34,8 @@ defmodule HotspotRunner.MixProject do
   defp deps do
     [
       {:exqlite, ">= 0.0.0"},
-      {:hotspot, in_umbrella: true}
+      {:hotspot, in_umbrella: true},
+      {:mox, "~> 1.0", only: :test}
     ]
   end
 

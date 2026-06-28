@@ -48,7 +48,7 @@ defmodule Hotspot.Analysis.Ownership do
       group_by: c.author_email,
       select: {c.author_email, max(c.committed_at)}
     )
-    |> Repo.all()
+    |> repo().all()
     |> Map.new()
   end
 
@@ -77,4 +77,6 @@ defmodule Hotspot.Analysis.Ownership do
 
   defp abandoned_days,
     do: Application.get_env(:hotspot, :ownership_abandoned_days, @default_abandoned_days)
+
+  defp repo, do: Application.get_env(:hotspot, :repo, Repo)
 end

@@ -1,13 +1,12 @@
 defmodule Hotspot.AnalysisTest do
-  @moduledoc """
-  Runs against a real runner-produced fixture db (read-only). Assertions are
-  structural, not exact counts, so they survive the fixture db being re-extracted.
-  """
-  # Not async: shares the singleton Hotspot.Storage with storage_test, which
-  # opens/closes the global db.
-  use ExUnit.Case, async: false
+  use Hotspot.IntegrationCase
 
   alias Hotspot.Analysis
+
+  setup do
+    seed_coupling_repo!()
+    :ok
+  end
 
   describe "repo_stats/0" do
     test "returns non-negative counts and a last_sha" do

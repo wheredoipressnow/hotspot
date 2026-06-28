@@ -37,7 +37,7 @@ defmodule Hotspot.Analysis.Complexity do
       where: not is_nil(t.indent_total),
       select: {t.path, %{loc: t.loc, indent_total: t.indent_total, indent_max: t.indent_max}}
     )
-    |> Repo.all()
+    |> repo().all()
     |> Map.new(fn {path, m} -> {path, Map.put(m, :indent_avg, avg(m.indent_total, m.loc))} end)
   rescue
     # tracked_file lacks the metric columns on an older db.
@@ -86,4 +86,6 @@ defmodule Hotspot.Analysis.Complexity do
 
   defp avg(_total, loc) when loc in [nil, 0], do: 0.0
   defp avg(total, loc), do: total / loc
+
+  defp repo, do: Application.get_env(:hotspot, :repo, Repo)
 end

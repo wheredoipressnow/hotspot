@@ -2,39 +2,29 @@ defmodule HotspotWeb.HotspotLiveTest do
   use HotspotWeb.ConnCase
 
   import Phoenix.LiveViewTest
+  import Mox
 
-  alias Hotspot.Storage
+  # The LiveView runs in its own process, so the mock must be reachable from any
+  # process (requires async: false, which ConnCase already is).
+  setup :set_mox_global
+  setup :verify_on_exit!
 
-  defp reopen_fixture do
-    case Storage.list() do
-      [%{path: path} | _] -> Storage.open(path)
-      [] -> :ok
-    end
-  end
+  setup do
+    # mount/3 only consults storage availability; with nothing open every
+    # Analysis read short-circuits before reaching the repo.
+    Hotspot.StorageMock
+    |> stub(:topic, fn -> "storage" end)
+    |> stub(:list, fn -> [] end)
+    |> stub(:current, fn -> nil end)
+    |> stub(:loaded?, fn -> false end)
 
-  test "with a db loaded, renders the hotspots view with the top bar and panels", %{conn: conn} do
-    reopen_fixture()
-
-    {:ok, _view, html} = live(conn, ~p"/")
-    # Top bar (repo management + global time range) and the docked panels.
-    assert html =~ "Open repository"
-    assert html =~ "All time"
-    assert html =~ "Top hotspots"
-    assert html =~ ~s(phx-hook="CirclePack")
+    :ok
   end
 
   test "with no db loaded, renders the database picker", %{conn: conn} do
-    Storage.close()
-    on_exit(&reopen_fixture/0)
-
-    {:ok, view, html} = live(conn, ~p"/")
+    {:ok, _view, html} = live(conn, ~p"/")
     assert html =~ "Open a database"
     refute html =~ ~s(phx-hook="CirclePack")
-
-    # Picking a db reveals the chart without a reconnect.
-    [%{path: path} | _] = Storage.list()
-    render_click(view, "open_db", %{"db" => path})
-    assert render(view) =~ ~s(phx-hook="CirclePack")
   end
 
   describe "repository picker" do

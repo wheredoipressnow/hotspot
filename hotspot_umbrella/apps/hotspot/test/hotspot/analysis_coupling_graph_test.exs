@@ -1,12 +1,12 @@
 defmodule Hotspot.AnalysisCouplingGraphTest do
-  @moduledoc """
-  Structural tests for the recursive coupling graph against the real fixture db
-  (read-only), like `Hotspot.AnalysisCouplingTest`: invariants that survive a
-  re-extraction, not exact ratios.
-  """
-  use ExUnit.Case, async: false
+  use Hotspot.IntegrationCase
 
   alias Hotspot.Analysis
+
+  setup do
+    seed_coupling_repo!()
+    :ok
+  end
 
   defp busiest_path do
     [%{path: path} | _] = Analysis.top_hotspots(%{scope: "files", limit: 1})

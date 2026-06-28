@@ -1,21 +1,11 @@
 defmodule Hotspot.StorageTest do
-  @moduledoc """
-  Exercises the storage lifecycle against the real fixture dir. Not async: it
-  opens/closes the singleton Repo pool, so it must not overlap analysis_test.
-  Each test restores the globally-open fixture so the rest of the suite is unaffected.
-  """
-  use ExUnit.Case, async: false
+  use Hotspot.IntegrationCase
 
   alias Hotspot.{Analysis, Storage}
 
   setup do
-    on_exit(fn ->
-      # Restore the fixture opened in test_helper.exs.
-      case Storage.list() do
-        [%{path: path} | _] -> Storage.open(path)
-        [] -> :ok
-      end
-    end)
+    seed_coupling_repo!()
+    :ok
   end
 
   test "list/0 returns the .db files in the configured dir" do

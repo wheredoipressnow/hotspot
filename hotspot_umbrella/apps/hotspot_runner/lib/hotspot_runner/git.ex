@@ -17,6 +17,22 @@ defmodule HotspotRunner.Git do
   # headers stay unambiguous against the interleaved `git log -p` output.
   @xray_pretty "format:%x1e%H%x1f%at%x1f%aN%x1f%aE%x1f%P"
 
+  @callback toplevel(cwd :: String.t()) :: String.t()
+  @callback tip_sha(cwd :: String.t(), ref :: String.t()) :: String.t()
+  @callback tracked_files(cwd :: String.t(), ref :: String.t()) :: [String.t()]
+  @callback open_log(cwd :: String.t(), args :: [String.t()]) :: port()
+  @callback tree_blobs(cwd :: String.t(), ref :: String.t()) :: [{String.t(), String.t()}]
+  @callback read_blobs(cwd :: String.t(), shas :: [String.t()]) :: %{String.t() => binary}
+  @callback file_log(
+              cwd :: String.t(),
+              ref :: String.t(),
+              path :: String.t(),
+              since :: integer | nil,
+              until :: integer | nil
+            ) :: {:ok, binary} | {:error, String.t()}
+  @callback blame(cwd :: String.t(), ref :: String.t(), path :: String.t()) ::
+              {:ok, binary} | {:error, String.t()}
+
   @doc "Resolve the repository top-level dir (so a subdir invocation maps to one db)."
   @spec toplevel(String.t()) :: String.t()
   def toplevel(cwd) do

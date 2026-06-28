@@ -1,9 +1,5 @@
 defmodule HotspotRunner.TreeScanTest do
-  use ExUnit.Case, async: false
-
-  # Builds a throwaway git repo and shells out to `git`, so it is excluded by
-  # default (see test_helper.exs). Run with: mix test --include git
-  @moduletag :git
+  use HotspotRunner.GitCase
 
   alias HotspotRunner.TreeScan
 

@@ -1,6 +1,9 @@
 defmodule HotspotRunner.WriterTest do
   use ExUnit.Case, async: true
 
+  # Opt-in; run with `mix test --include integration`.
+  @moduletag :integration
+
   alias HotspotRunner.Writer
 
   setup do
