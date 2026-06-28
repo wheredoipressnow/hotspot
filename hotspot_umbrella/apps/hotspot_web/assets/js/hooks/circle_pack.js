@@ -15,6 +15,63 @@ function colorFor(value, min, max) {
   return `rgb(${c[0]}, ${c[1]}, ${c[2]})`
 }
 
+// Thermal ramp for the heavy-tailed metrics (change frequency, hotspot score). The cold
+// end recedes into the canvas; the hot end is whichever color is most salient for the
+// theme (bright gold on dark, deep red on light), so hotter always reads as redder.
+const FREQ_STOPS_DARK = [
+  [98, 88, 82], // #62584f cold warm-gray
+  [150, 52, 30], // #963414 deep red
+  [228, 92, 34], // #e45c22 orange-red
+  [255, 198, 70], // #ffc646 hot gold
+]
+const FREQ_STOPS_LIGHT = [
+  [228, 222, 214], // #e4ded6 pale warm-gray
+  [242, 168, 72], // #f2a848 amber
+  [228, 86, 36], // #e45624 orange-red
+  [168, 26, 22], // #a81a16 deep red, hottest
+]
+// Code metrics are heavy-tailed: a few spikes over a long flat tail. Heating only the top
+// (1 - HOT_FROM) percentile keeps the noisy majority at the cold floor, where a linear or
+// sqrt ramp over [min,max] would instead tint most of the repo warm.
+const HOT_FROM = 0.75
+
+function thermalColor(stops, t) {
+  const span = stops.length - 1
+  const seg = Math.min(span - 1, Math.floor(t * span))
+  const f = t * span - seg
+  const c = stops[seg].map((lo, i) => Math.round(lo + (stops[seg + 1][i] - lo) * f))
+  return `rgb(${c[0]}, ${c[1]}, ${c[2]})`
+}
+
+// Maps a value to its percentile, then rescales the top slice (above HOT_FROM) to [0,1];
+// anything below returns 0.
+function thresholdedRanker(values) {
+  const sorted = values.slice().sort((a, b) => a - b)
+  const n = sorted.length
+  return (v) => {
+    if (n <= 1) return 0
+    let lo = 0
+    let hi = n
+    while (lo < hi) {
+      const m = (lo + hi) >> 1
+      if (sorted[m] < v) lo = m + 1
+      else hi = m
+    }
+    const pct = lo / (n - 1)
+    return pct <= HOT_FROM ? 0 : (pct - HOT_FROM) / (1 - HOT_FROM)
+  }
+}
+
+// Per-leaf scalar each continuous color mode ranks. Hotspot score is revisions x
+// complexity (Tornhill): high only when a file is both, so it suppresses the merely
+// churny and the merely large.
+function colorValueFn(colorBy) {
+  if (colorBy === "hotspot_score")
+    return (l) => (l.data.revisions || 0) * (l.data.indent_total || 0)
+  if (colorBy === "revisions") return (l) => l.data.revisions || 0
+  return (l) => l.data.author_count || 0
+}
+
 // Knowledge map: a stable hue per author, so files owned by the same person share
 // a color. No author (churn-free file) falls back to a neutral gray.
 function authorColor(author) {
@@ -140,9 +197,18 @@ export const CirclePack = {
     const chrome = themeChrome()
     this.svg.style.setProperty("--leaf-hover", chrome.hover)
 
-    const acs = root.leaves().map((l) => l.data.author_count || 0)
-    const min = Math.min(0, ...acs)
-    const max = Math.max(1, ...acs)
+    // The thermal metrics rank against the whole repo, not just the zoomed-in scope;
+    // author_count keeps its plain linear ramp.
+    const ranked = this.colorBy === "revisions" || this.colorBy === "hotspot_score"
+    const value = colorValueFn(this.colorBy)
+    const leafVals = root.leaves().map(value)
+    const rankOf = ranked ? thresholdedRanker(leafVals) : null
+    const stops =
+      document.documentElement.getAttribute("data-theme") === "dark"
+        ? FREQ_STOPS_DARK
+        : FREQ_STOPS_LIGHT
+    const acMin = Math.min(0, ...leafVals)
+    const acMax = Math.max(1, ...leafVals)
 
     for (const d of root.descendants()) {
       const circle = document.createElementNS(SVGNS, "circle")
@@ -161,10 +227,10 @@ export const CirclePack = {
         circle.addEventListener("mouseleave", () => this.hideTip())
       } else {
         circle.setAttribute("class", "node--leaf")
-        const fill =
-          this.colorBy === "main_author"
-            ? authorColor(d.data.main_author)
-            : colorFor(d.data.author_count || 0, min, max)
+        let fill
+        if (this.colorBy === "main_author") fill = authorColor(d.data.main_author)
+        else if (ranked) fill = thermalColor(stops, rankOf(value(d)))
+        else fill = colorFor(value(d), acMin, acMax)
         circle.setAttribute("fill", fill)
         circle.addEventListener("mousemove", (e) => this.showTip(e, d))
         circle.addEventListener("mouseleave", () => this.hideTip())

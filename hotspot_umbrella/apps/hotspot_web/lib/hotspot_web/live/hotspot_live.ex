@@ -37,10 +37,14 @@ defmodule HotspotWeb.HotspotLive do
     {"Recency-weighted churn", "recency_churn"},
     {"Last changed", "last_changed"}
   ]
-  # Leaf circle color encodings. "author_count" is the cool->warm ramp; "main_author"
-  # is the knowledge map (one categorical hue per dominant author).
+  # Leaf circle color encodings. "author_count" is the cool->warm ramp; "revisions" and
+  # "hotspot_score" (revisions x complexity) are the heavy-tailed thermal ramps, where only
+  # the top percentile heats up; "main_author" is the knowledge map (one categorical hue per
+  # dominant author). The thermal ramps rank against the whole repo client-side.
   @color_modes [
     {"Author count", "author_count"},
+    {"Change frequency", "revisions"},
+    {"Hotspot score (change × complexity)", "hotspot_score"},
     {"Main author (knowledge map)", "main_author"}
   ]
   @top_limit 25
@@ -85,7 +89,7 @@ defmodule HotspotWeb.HotspotLive do
      assign(socket,
        metric: "churn",
        color_by: "author_count",
-       color_modes: @color_modes,
+       color_modes: color_modes_for(complexity),
        current_scope: "",
        # Global analysis window; persists across db switches. See `time_bounds/1`.
        time_range: :all,
@@ -598,6 +602,8 @@ defmodule HotspotWeb.HotspotLive do
         removed_filter_available: available,
         complexity_available: complexity,
         subjects_available: subjects,
+        color_modes: color_modes_for(complexity),
+        color_by: keep_color_by(socket.assigns.color_by, complexity),
         metrics: metrics_for(complexity),
         # A non-complexity db can't show the scatter; fall back to the map.
         view_mode: if(complexity, do: socket.assigns.view_mode, else: "map"),
@@ -699,8 +705,22 @@ defmodule HotspotWeb.HotspotLive do
 
   # Size encodings. LOC needs the complexity snapshot, so it is offered only when
   # the db carries it (older dbs hide the option rather than sizing everything to 0).
-  defp metrics_for(true), do: @metrics ++ [{"Lines of code", "loc"}]
+  defp metrics_for(true),
+    do: @metrics ++ [{"Lines of code", "loc"}, {"Complexity (indentation)", "indent_total"}]
+
   defp metrics_for(false), do: @metrics
+
+  # Color encodings. Hotspot score multiplies revisions by complexity, so it is offered
+  # only when the db carries the complexity snapshot.
+  defp color_modes_for(true), do: @color_modes
+
+  defp color_modes_for(false),
+    do: Enum.reject(@color_modes, fn {_, v} -> v == "hotspot_score" end)
+
+  # On a db switch that drops complexity, an active hotspot-score coloring would have no
+  # matching option and tint everything cold; fall back to the default ramp.
+  defp keep_color_by("hotspot_score", false), do: "author_count"
+  defp keep_color_by(color_by, _complexity), do: color_by
 
   # The current file's complexity for the X-Ray header, or nil (older db, binary, absent).
   defp file_complexity(path) do
