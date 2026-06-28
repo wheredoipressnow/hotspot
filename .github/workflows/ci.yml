@@ -13,6 +13,10 @@ jobs:
   test:
     runs-on: ubuntu-latest
 
+    defaults:
+      run:
+        working-directory: hotspot_umbrella
+
     steps:
       - uses: actions/checkout@v4
 
@@ -26,8 +30,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            deps
-            _build
+            hotspot_umbrella/deps
+            hotspot_umbrella/_build
           key: ${{ runner.os }}-mix-${{ hashFiles('**/mix.lock') }}
           restore-keys: |
             ${{ runner.os }}-mix-
