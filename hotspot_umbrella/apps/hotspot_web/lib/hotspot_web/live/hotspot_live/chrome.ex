@@ -1,8 +1,7 @@
 defmodule HotspotWeb.HotspotLive.Chrome do
   @moduledoc """
-  Shared layout chrome: the top bar (database management, scope breadcrumb, time
-  range, theme toggle), the scope breadcrumb, the reusable docked side panel, and the
-  default map controls.
+  Shared layout chrome: the top bar (database picker, scope breadcrumb, time range,
+  theme toggle), the reusable docked side panel, and the default map controls.
   """
   use HotspotWeb, :html
 

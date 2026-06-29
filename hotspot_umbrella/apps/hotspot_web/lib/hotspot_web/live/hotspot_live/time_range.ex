@@ -3,10 +3,7 @@ defmodule HotspotWeb.HotspotLive.TimeRange do
   Stored analysis windows for the top-bar time-range control.
 
   A range is either a preset atom (`:all`, `:y1`, `:m6`, `:m3`, `:m1`) or a
-  `{:custom, from, until}` tuple of inclusive epoch bounds, where `nil` is an open
-  end. This module parses the control's form params into a range, resolves a range
-  to `{since, until}` bounds, and renders a range back to the option value and date
-  strings the control needs.
+  `{:custom, from, until}` tuple of inclusive epoch bounds, where `nil` is an open end.
   """
 
   @time_presets [
