@@ -22,6 +22,17 @@ defmodule HotspotWeb.HotspotLive do
 
   alias Hotspot.{Analysis, Storage}
 
+  alias HotspotWeb.HotspotLive.{
+    Chrome,
+    Coupling,
+    Hotspots,
+    Palette,
+    Picker,
+    Scatter,
+    TimeRange,
+    XRay
+  }
+
   @metrics [
     {"Churn", "churn"},
     {"Revisions", "revisions"},
@@ -49,30 +60,6 @@ defmodule HotspotWeb.HotspotLive do
   ]
   @top_limit 25
 
-  # Preset analysis windows for the top-bar time-range control. "custom" is added
-  # by the control itself (a from/to date pair); see `parse_time_range/1`.
-  @time_presets [
-    {"All time", "all"},
-    {"Last 12 months", "y1"},
-    {"Last 6 months", "m6"},
-    {"Last 3 months", "m3"},
-    {"Last 30 days", "m1"}
-  ]
-  @seconds_per_day 86_400
-
-  # Render-time view preferences for the X-Ray dashboard. They slice data already in
-  # the `@xray` assign (no refetch), so changing one only re-renders. See `xray_controls/1`.
-  @xray_sorts [{"Churn", "churn"}, {"Recency", "recency"}, {"Authors", "authors"}]
-  @xray_region_opts [{"Top 10", "10"}, {"Top 30", "30"}, {"All", "all"}]
-  @xray_commit_opts [{"5", "5"}, {"15", "15"}, {"All", "all"}]
-  @xray_pref_defaults %{
-    sort: "churn",
-    region_limit: 30,
-    commit_limit: 15,
-    hide_unattributed: false,
-    show_source: true
-  }
-
   @impl true
   def mount(_params, _session, socket) do
     if connected?(socket) do
@@ -83,7 +70,7 @@ defmodule HotspotWeb.HotspotLive do
     available = Analysis.removed_filter_available?()
     complexity = Analysis.complexity_available?()
     subjects = Analysis.subjects_available?()
-    root = repo_root()
+    root = Picker.repo_root()
 
     {:ok,
      assign(socket,
@@ -91,7 +78,7 @@ defmodule HotspotWeb.HotspotLive do
        color_by: "author_count",
        color_modes: color_modes_for(complexity),
        current_scope: "",
-       # Global analysis window; persists across db switches. See `time_bounds/1`.
+       # Global analysis window; persists across db switches. See `TimeRange.bounds/1`.
        time_range: :all,
        # Default to excluding removed files when the db can, else include all.
        include_removed: not available,
@@ -103,9 +90,6 @@ defmodule HotspotWeb.HotspotLive do
        show_labels: false,
        metrics: metrics_for(complexity),
        sorts: @sorts,
-       xray_sorts: @xray_sorts,
-       xray_region_opts: @xray_region_opts,
-       xray_commit_opts: @xray_commit_opts,
        hotspots_scope: "files",
        hotspots_sort: "churn",
        hotspots: [],
@@ -120,13 +104,13 @@ defmodule HotspotWeb.HotspotLive do
        xray: nil,
        # X-Ray render preferences (sort/limits/toggles). Top-level so they persist as
        # the user drills from file to file in one session.
-       xray_prefs: default_xray_prefs(),
+       xray_prefs: XRay.default_prefs(),
        # Force-directed coupling "cloud" overlay (nil = closed). Opened from the
        # X-Ray dashboard; re-rooted by clicking a node.
        coupling_graph: nil,
        # Live force-layout knobs for the coupling cloud (slider-driven). Kept at the
        # top level so tuning survives re-center, depth changes, and reopening.
-       coupling_params: default_coupling_params(),
+       coupling_params: Coupling.default_params(),
        prefs_open: true,
        hotspots_open: true,
        dbs: storage().list(),
@@ -179,7 +163,7 @@ defmodule HotspotWeb.HotspotLive do
 
   # A new window reshapes circle sizes, the list, and the scatter: full refresh.
   def handle_event("set_time_range", params, socket) do
-    {:noreply, socket |> assign(time_range: parse_time_range(params)) |> refresh()}
+    {:noreply, socket |> assign(time_range: TimeRange.parse(params)) |> refresh()}
   end
 
   def handle_event("set_sort", %{"sort" => sort}, socket) do
@@ -200,7 +184,9 @@ defmodule HotspotWeb.HotspotLive do
 
   def handle_event("open_picker", _params, socket) do
     dir = socket.assigns.picker_root
-    {:noreply, assign(socket, picker_open: true, picker_dir: dir, picker_entries: list_dirs(dir))}
+
+    {:noreply,
+     assign(socket, picker_open: true, picker_dir: dir, picker_entries: Picker.list_dirs(dir))}
   end
 
   def handle_event("close_picker", _params, socket) do
@@ -208,9 +194,9 @@ defmodule HotspotWeb.HotspotLive do
   end
 
   def handle_event("picker_nav", %{"path" => path}, socket) do
-    if within_root?(path, socket.assigns.picker_root) and File.dir?(path) do
+    if Picker.within_root?(path, socket.assigns.picker_root) and File.dir?(path) do
       dir = Path.expand(path)
-      {:noreply, assign(socket, picker_dir: dir, picker_entries: list_dirs(dir))}
+      {:noreply, assign(socket, picker_dir: dir, picker_entries: Picker.list_dirs(dir))}
     else
       {:noreply, socket}
     end
@@ -220,7 +206,7 @@ defmodule HotspotWeb.HotspotLive do
     path = Path.expand(path)
 
     cond do
-      not within_root?(path, socket.assigns.picker_root) ->
+      not Picker.within_root?(path, socket.assigns.picker_root) ->
         {:noreply, socket}
 
       not File.dir?(Path.join(path, ".git")) ->
@@ -250,7 +236,7 @@ defmodule HotspotWeb.HotspotLive do
      assign(socket,
        palette_open: open,
        palette_query: "",
-       palette_results: palette_filter(socket.assigns.path_index, "")
+       palette_results: Palette.filter(socket.assigns.path_index, "")
      )}
   end
 
@@ -262,7 +248,7 @@ defmodule HotspotWeb.HotspotLive do
     {:noreply,
      assign(socket,
        palette_query: q,
-       palette_results: palette_filter(socket.assigns.path_index, q)
+       palette_results: Palette.filter(socket.assigns.path_index, q)
      )}
   end
 
@@ -351,7 +337,7 @@ defmodule HotspotWeb.HotspotLive do
         %{"depth" => depth},
         %{assigns: %{coupling_graph: %{path: path}}} = socket
       ) do
-    {:noreply, start_graph(socket, path, to_depth(depth))}
+    {:noreply, start_graph(socket, path, Coupling.to_depth(depth))}
   end
 
   # Clicking a node re-roots the cloud on that file, keeping the current depth.
@@ -381,12 +367,12 @@ defmodule HotspotWeb.HotspotLive do
   # Slider moved in the "Forces" panel: cast the changed field(s) and push the merged
   # set to the hook, which re-tunes the live simulation without refetching data.
   def handle_event("set_coupling_params", params, socket) do
-    merged = merge_coupling_params(socket.assigns.coupling_params, params)
+    merged = Coupling.merge_params(socket.assigns.coupling_params, params)
     {:noreply, socket |> assign(coupling_params: merged) |> push_event("coupling:params", merged)}
   end
 
   def handle_event("reset_coupling_params", _params, socket) do
-    defaults = default_coupling_params()
+    defaults = Coupling.default_params()
 
     {:noreply,
      socket |> assign(coupling_params: defaults) |> push_event("coupling:params", defaults)}
@@ -395,11 +381,11 @@ defmodule HotspotWeb.HotspotLive do
   # X-Ray controls: pure view preferences over already-fetched data, so re-rendering
   # the dashboard applies them (no async, no push to the client).
   def handle_event("set_xray_view", params, socket) do
-    {:noreply, assign(socket, xray_prefs: merge_xray_prefs(socket.assigns.xray_prefs, params))}
+    {:noreply, assign(socket, xray_prefs: XRay.merge_prefs(socket.assigns.xray_prefs, params))}
   end
 
   def handle_event("reset_xray_view", _params, socket) do
-    {:noreply, assign(socket, xray_prefs: default_xray_prefs())}
+    {:noreply, assign(socket, xray_prefs: XRay.default_prefs())}
   end
 
   @impl true
@@ -461,13 +447,6 @@ defmodule HotspotWeb.HotspotLive do
     end)
   end
 
-  defp to_depth(depth) do
-    case Integer.parse(to_string(depth)) do
-      {n, _} -> n |> max(1) |> min(3)
-      :error -> 2
-    end
-  end
-
   # Apply a patch to the live X-Ray assign only if it still targets `path`.
   defp merge_xray(socket, path, patch) do
     case socket.assigns.xray do
@@ -480,108 +459,11 @@ defmodule HotspotWeb.HotspotLive do
   defp coupling_list(rows) when is_list(rows), do: rows
   defp coupling_list(_), do: []
 
-  # --- Coupling-graph force parameters ---------------------------------------
-  # Live layout knobs shared between the "Forces" panel and the JS hook. Each entry
-  # is `{key, default, min, max, step, label}`; the defaults reproduce the baseline
-  # layout. `min`/`max` clamp slider input so an out-of-range value cannot wedge the
-  # simulation.
-  @coupling_param_specs [
-    {:repel, -420, -800, -100, 20, "Repel"},
-    {:center, 1.0, 0.0, 1.0, 0.05, "Center pull"},
-    {:link_strength, 1.0, 0.0, 2.0, 0.1, "Link strength"},
-    {:link_distance, 1.0, 0.3, 2.5, 0.1, "Link distance"},
-    {:node_size, 1.0, 0.5, 2.0, 0.1, "Node size"},
-    {:link_width, 1.0, 0.5, 3.0, 0.1, "Link thickness"}
-  ]
-
-  defp default_coupling_params do
-    Map.new(@coupling_param_specs, fn {key, default, _min, _max, _step, _label} ->
-      {key, default}
-    end)
-  end
-
-  # Cast the changed slider field(s) into the current params, clamped to each spec's
-  # range. A single-slider `phx-change` only carries one key; unknown keys are ignored.
-  defp merge_coupling_params(current, params) do
-    Enum.reduce(@coupling_param_specs, current, fn {key, _default, min, max, _step, _label},
-                                                   acc ->
-      case Map.fetch(params, Atom.to_string(key)) do
-        {:ok, raw} ->
-          case Float.parse(to_string(raw)) do
-            {value, _} -> Map.put(acc, key, value |> max(min) |> min(max))
-            :error -> acc
-          end
-
-        :error ->
-          acc
-      end
-    end)
-  end
-
   # Push the graph to the hook with the live force params folded in, so a (re)mount or
   # rebuild initializes the simulation at the current slider values rather than defaults.
   defp push_graph(socket, graph) do
     push_event(socket, "coupling:graph", Map.put(graph, :params, socket.assigns.coupling_params))
   end
-
-  # --- X-Ray view preferences ------------------------------------------------
-
-  defp default_xray_prefs, do: @xray_pref_defaults
-
-  # Cast the whole form back into prefs (a `phx-change` form serializes every field).
-  # Each checkbox sends a hidden "false" companion, so an unchecked box reads false and
-  # a checked one reads true. Absent or unparseable fields keep their current value.
-  defp merge_xray_prefs(current, params) do
-    current
-    |> put_pref(:sort, params["sort"], fn v -> if valid_sort?(v), do: v end)
-    |> put_pref(:region_limit, params["region_limit"], &parse_limit/1)
-    |> put_pref(:commit_limit, params["commit_limit"], &parse_limit/1)
-    |> put_pref(:hide_unattributed, params["hide_unattributed"], &parse_bool/1)
-    |> put_pref(:show_source, params["show_source"], &parse_bool/1)
-  end
-
-  # Apply `cast` to a raw form value and store it under `key`, unless the field is
-  # absent (nil) or the cast rejects it (also nil).
-  defp put_pref(prefs, _key, nil, _cast), do: prefs
-
-  defp put_pref(prefs, key, raw, cast) do
-    case cast.(raw) do
-      nil -> prefs
-      value -> Map.put(prefs, key, value)
-    end
-  end
-
-  defp valid_sort?(value), do: Enum.any?(@xray_sorts, fn {_label, v} -> v == value end)
-
-  defp parse_limit("all"), do: :all
-
-  defp parse_limit(raw) do
-    case Integer.parse(raw) do
-      {n, _} when n > 0 -> n
-      _ -> nil
-    end
-  end
-
-  defp parse_bool("true"), do: true
-  defp parse_bool("false"), do: false
-  defp parse_bool(_), do: nil
-
-  # Re-rank regions by the chosen key. Defaults to churn, the order the runner already
-  # returns, so "churn" is a stable no-op.
-  defp sort_regions(regions, "recency"), do: Enum.sort_by(regions, & &1.recency_churn, :desc)
-  defp sort_regions(regions, "authors"), do: Enum.sort_by(regions, & &1.author_count, :desc)
-  defp sort_regions(regions, _churn), do: Enum.sort_by(regions, & &1.churn, :desc)
-
-  defp take_limit(list, :all), do: list
-  defp take_limit(list, n) when is_integer(n), do: Enum.take(list, n)
-
-  defp drop_unattributed(regions, false), do: regions
-
-  defp drop_unattributed(regions, true),
-    do: Enum.reject(regions, &(&1.name == unattributed_name()))
-
-  defp commits_hidden(_commits, :all), do: 0
-  defp commits_hidden(commits, n) when is_integer(n), do: max(0, length(commits) - n)
 
   @impl true
   def handle_info({:storage_changed, current}, socket) do
@@ -659,7 +541,7 @@ defmodule HotspotWeb.HotspotLive do
 
     socket
     |> assign(path_index: index)
-    |> assign(palette_results: palette_filter(index, socket.assigns.palette_query))
+    |> assign(palette_results: Palette.filter(index, socket.assigns.palette_query))
   end
 
   defp assign_scatter(%{assigns: %{complexity_available: false}} = socket),
@@ -769,117 +651,14 @@ defmodule HotspotWeb.HotspotLive do
 
   # --- Time range ------------------------------------------------------------
 
-  defp time_presets, do: @time_presets
-
-  # `:since`/`:until` params for the current window, ready to merge into a query
-  # params map.
-  defp time_window(socket) do
-    {since, until} = time_bounds(socket.assigns.time_range)
-    %{since: since, until: until}
-  end
-
-  # Resolve a stored range to inclusive `{since, until}` epoch bounds; `nil` is open.
-  defp time_bounds(:all), do: {nil, nil}
-  defp time_bounds(:y1), do: {days_ago(365), nil}
-  defp time_bounds(:m6), do: {days_ago(182), nil}
-  defp time_bounds(:m3), do: {days_ago(91), nil}
-  defp time_bounds(:m1), do: {days_ago(30), nil}
-  defp time_bounds({:custom, from, until}), do: {from, until}
-  defp time_bounds(_), do: {nil, nil}
-
-  defp days_ago(n), do: System.os_time(:second) - n * @seconds_per_day
-
-  # Parse the time-range form into a stored range. "custom" carries from/to dates
-  # (start-of-day / end-of-day, UTC); blanks stay open-ended.
-  defp parse_time_range(%{"preset" => "custom"} = params) do
-    {:custom, parse_date(params["from"], :start), parse_date(params["to"], :end)}
-  end
-
-  defp parse_time_range(%{"preset" => preset}), do: preset_atom(preset)
-  defp parse_time_range(_), do: :all
-
-  defp preset_atom("y1"), do: :y1
-  defp preset_atom("m6"), do: :m6
-  defp preset_atom("m3"), do: :m3
-  defp preset_atom("m1"), do: :m1
-  defp preset_atom(_), do: :all
-
-  defp parse_date(date, _edge) when date in [nil, ""], do: nil
-
-  defp parse_date(date, edge) do
-    case Date.from_iso8601(date) do
-      {:ok, d} ->
-        time = if edge == :end, do: ~T[23:59:59], else: ~T[00:00:00]
-        d |> DateTime.new!(time, "Etc/UTC") |> DateTime.to_unix()
-
-      _ ->
-        nil
-    end
-  end
-
-  # The select's option value for the stored range; `{:custom, ...}` -> "custom".
-  defp time_range_key({:custom, _, _}), do: "custom"
-  defp time_range_key(range), do: to_string(range)
-
-  # The from/to date strings to pre-fill the custom inputs, else blanks.
-  defp custom_dates({:custom, from, until}), do: {date_str(from), date_str(until)}
-  defp custom_dates(_), do: {"", ""}
-
-  defp date_str(nil), do: ""
-
-  defp date_str(epoch),
-    do: epoch |> DateTime.from_unix!() |> DateTime.to_date() |> Date.to_iso8601()
-
-  # --- Fuzzy finder ----------------------------------------------------------
-
-  @palette_limit 50
-
-  # Rank index entries against the query. Empty query shows the first N entries; a
-  # substring match ranks above a looser subsequence match; ties break on path length.
-  defp palette_filter(index, query) do
-    case String.trim(query) do
-      "" ->
-        Enum.take(index, @palette_limit)
-
-      q ->
-        q = String.downcase(q)
-
-        index
-        |> Enum.flat_map(fn e ->
-          case fuzzy_score(String.downcase(e.path), q) do
-            nil -> []
-            score -> [{score, e}]
-          end
-        end)
-        |> Enum.sort_by(fn {score, e} -> {score, String.length(e.path)} end)
-        |> Enum.take(@palette_limit)
-        |> Enum.map(&elem(&1, 1))
-    end
-  end
-
-  # Lower is better: a substring match (ranked by its position) beats a subsequence
-  # match; `nil` when the query is not even a subsequence.
-  defp fuzzy_score(path, q) do
-    case :binary.match(path, q) do
-      {pos, _} -> {0, pos}
-      :nomatch -> if subsequence?(path, q), do: {1, 0}, else: nil
-    end
-  end
-
-  defp subsequence?(_path, ""), do: true
-  defp subsequence?("", _q), do: false
-
-  defp subsequence?(<<ch::utf8, prest::binary>>, <<ch::utf8, qrest::binary>>),
-    do: subsequence?(prest, qrest)
-
-  defp subsequence?(<<_::utf8, prest::binary>>, q), do: subsequence?(prest, q)
+  defp time_window(socket), do: TimeRange.window(socket.assigns.time_range)
 
   @impl true
   def render(assigns) do
     ~H"""
     <div class="h-screen flex flex-col overflow-hidden">
-      <.extraction_banner :if={@extraction} extraction={@extraction} />
-      <.repo_picker
+      <Picker.extraction_banner :if={@extraction} extraction={@extraction} />
+      <Picker.repo_picker
         :if={@picker_open}
         dir={@picker_dir}
         root={@picker_root}
@@ -888,30 +667,24 @@ defmodule HotspotWeb.HotspotLive do
 
       <%!-- Captures Ctrl/Cmd+P globally to toggle the fuzzy finder (see the Palette hook). --%>
       <div id="palette-key" phx-hook="Palette" class="hidden"></div>
-      <.command_palette
+      <Palette.command_palette
         :if={@palette_open}
         query={@palette_query}
         results={@palette_results}
       />
 
-      <.top_bar dbs={@dbs} current={@current} scope={@current_scope} time_range={@time_range} />
+      <Chrome.top_bar dbs={@dbs} current={@current} scope={@current_scope} time_range={@time_range} />
 
       <div class="flex-1 flex overflow-hidden min-h-0">
-        <.panel
+        <Chrome.panel
           open={@prefs_open}
           side="left"
-          title={view_panel_title(@coupling_graph, @xray)}
+          title={Chrome.view_panel_title(@coupling_graph, @xray)}
           toggle="toggle_prefs"
         >
-          <.coupling_controls :if={@coupling_graph} params={@coupling_params} />
-          <.xray_controls
-            :if={is_nil(@coupling_graph) and @xray}
-            prefs={@xray_prefs}
-            sorts={@xray_sorts}
-            region_opts={@xray_region_opts}
-            commit_opts={@xray_commit_opts}
-          />
-          <.controls
+          <Coupling.coupling_controls :if={@coupling_graph} params={@coupling_params} />
+          <XRay.xray_controls :if={is_nil(@coupling_graph) and @xray} prefs={@xray_prefs} />
+          <Chrome.controls
             :if={is_nil(@coupling_graph) and is_nil(@xray)}
             metric={@metric}
             metrics={@metrics}
@@ -921,7 +694,7 @@ defmodule HotspotWeb.HotspotLive do
             removed_filter_available={@removed_filter_available}
             show_labels={@show_labels}
           />
-        </.panel>
+        </Chrome.panel>
 
         <div class="flex-1 relative min-w-0 bg-base-100">
           <%!-- Map/scatter toggle, shown only when the db carries complexity metrics. --%>
@@ -956,7 +729,7 @@ defmodule HotspotWeb.HotspotLive do
             </div>
           </div>
 
-          <.scatter_plot :if={@current && @view_mode == "scatter"} points={@scatter} />
+          <Scatter.scatter_plot :if={@current && @view_mode == "scatter"} points={@scatter} />
 
           <div :if={is_nil(@current)} class="h-full flex items-center justify-center px-6">
             <p class="text-sm opacity-60 text-center">
@@ -965,1340 +738,28 @@ defmodule HotspotWeb.HotspotLive do
           </div>
 
           <%!-- A selected file overlays its deep-dive on top of the (still-mounted) circle pack. --%>
-          <.file_dashboard
+          <XRay.file_dashboard
             :if={@current && @xray && @xray.state in [:loading, :ready, :error]}
             xray={@xray}
             prefs={@xray_prefs}
           />
 
           <%!-- The coupling cloud overlays the X-Ray dashboard when opened. --%>
-          <.coupling_graph_view :if={@current && @coupling_graph} graph={@coupling_graph} />
+          <Coupling.coupling_graph_view :if={@current && @coupling_graph} graph={@coupling_graph} />
         </div>
 
-        <.panel open={@hotspots_open} side="right" title="Top hotspots" toggle="toggle_hotspots">
-          <.top_hotspots
+        <Chrome.panel open={@hotspots_open} side="right" title="Top hotspots" toggle="toggle_hotspots">
+          <Hotspots.top_hotspots
             current={@current}
             scope={@hotspots_scope}
             sort={@hotspots_sort}
             sorts={@sorts}
             hotspots={@hotspots}
           />
-        </.panel>
+        </Chrome.panel>
       </div>
     </div>
     """
-  end
-
-  # --- File dashboard (overlays the chart while X-Ray is open) ---------------
-  # Behavioral view of one file: a region×time churn heatmap (hottest rows on top;
-  # rows hot in the same columns are entangled), a cohesion verdict, and the files
-  # this one changes together with (temporal coupling).
-
-  attr(:xray, :map, required: true)
-  attr(:prefs, :map, required: true)
-
-  defp file_dashboard(assigns) do
-    ready = assigns.xray.state == :ready
-    prefs = assigns.prefs
-
-    selected =
-      if ready do
-        assigns.xray.regions
-        |> sort_regions(prefs.sort)
-        |> drop_unattributed(prefs.hide_unattributed)
-      else
-        []
-      end
-
-    regions = take_limit(selected, prefs.region_limit)
-    maxcell = regions |> Enum.flat_map(& &1.heat) |> Enum.max(fn -> 0 end)
-
-    assigns =
-      assign(assigns,
-        ready: ready,
-        regions: regions,
-        maxcell: max(maxcell, 1),
-        extra: length(selected) - length(regions)
-      )
-
-    ~H"""
-    <div class="absolute inset-0 z-10 bg-base-100 flex flex-col">
-      <div class="sticky top-0 z-10 flex items-center gap-3 px-4 py-2 border-b border-base-300 bg-base-100/95 backdrop-blur">
-        <button type="button" phx-click="close_xray" class="btn btn-sm btn-ghost gap-1">
-          <.icon name="hero-arrow-left" class="size-4" /> Back to map
-        </button>
-        <span class="font-mono text-xs truncate opacity-70" title={@xray.path}>
-          {Path.basename(@xray.path)}
-        </span>
-        <button
-          :if={@ready}
-          type="button"
-          phx-click="open_coupling_graph"
-          phx-value-path={@xray.path}
-          class="btn btn-sm btn-ghost gap-1 ml-auto"
-          title="Explore this file's coupling neighbourhood as a graph"
-        >
-          <.icon name="hero-share" class="size-4" /> Coupling graph
-        </button>
-      </div>
-
-      <div class="grow overflow-auto">
-        <div
-          :if={!@ready and @xray.state == :loading}
-          class="h-full flex items-center justify-center gap-2 text-sm opacity-70"
-        >
-          <span class="loading loading-spinner loading-sm" />
-          Analyzing <span class="font-mono">{Path.basename(@xray.path)}</span>…
-        </div>
-
-        <div :if={@xray.state == :error} class="h-full flex items-center justify-center px-6">
-          <p class="text-sm text-error text-center">{@xray.reason}</p>
-        </div>
-
-        <div :if={@ready} class="flex flex-col lg:flex-row gap-4 p-4 h-full">
-          <div class={["space-y-5", @prefs.show_source && "lg:w-[34rem] lg:shrink-0"]}>
-            <div>
-              <div class="font-mono text-sm truncate" title={@xray.path}>{@xray.path}</div>
-              <div class="text-xs opacity-60 mt-1 flex flex-wrap gap-x-4 gap-y-1">
-                <span>{length(@xray.regions)} regions</span>
-                <span :if={@xray.span}>
-                  active {relative_age(@xray.span.first)} → {relative_age(@xray.span.last)}
-                </span>
-                <span title="average distinct regions touched per commit">
-                  cohesion {@xray.cohesion.regions_per_commit}/commit · {cohesion_verdict(
-                    @xray.cohesion.regions_per_commit
-                  )}
-                </span>
-                <span :if={@xray[:complexity]} title="current size and indentation complexity">
-                  {@xray.complexity.loc} LOC · indent avg {Float.round(@xray.complexity.indent_avg, 1)} · max {@xray.complexity.indent_max}
-                </span>
-              </div>
-            </div>
-
-            <p :if={@regions == []} class="text-sm opacity-60">No attributable changes to chart.</p>
-
-            <div :if={@regions != []}>
-              <div class="text-xs opacity-60 mb-2">
-                Changed regions over time: hotter cells = more churn; rows hot in the
-                same columns tend to be entangled. Click a region for its commits.
-              </div>
-              <div class="overflow-x-auto">
-                <ol class="space-y-0.5 min-w-fit">
-                  <li :for={r <- @regions}>
-                    <details class="rounded hover:bg-base-200 [&_summary::-webkit-details-marker]:hidden">
-                      <summary class="flex items-center gap-2 px-1 py-0.5 cursor-pointer list-none">
-                        <span
-                          class="font-mono text-xs truncate w-48 shrink-0 flex items-center gap-1"
-                          title={r.name}
-                        >
-                          <span class="truncate">{r.name}</span>
-                          <span
-                            :if={r.name == unattributed_name()}
-                            title={unattributed_help()}
-                            class="shrink-0"
-                          >
-                            <.icon name="hero-information-circle" class="size-3 opacity-60" />
-                          </span>
-                        </span>
-                        <span class="flex gap-px shrink-0">
-                          <span
-                            :for={v <- r.heat}
-                            class="w-3 h-3 rounded-sm"
-                            style={heat_style(v, @maxcell)}
-                            title={"churn #{v}"}
-                          />
-                        </span>
-                        <span class="text-[11px] opacity-60 whitespace-nowrap ml-auto pl-2">
-                          {r.churn} · {r.author_count}a
-                          <span
-                            :if={owner_risk?(r)}
-                            class="text-warning"
-                            title={"#{round(r.top_author_share * 100)}% by #{author_label(r.top_author)}: knowledge risk"}
-                          >⚠</span>
-                        </span>
-                      </summary>
-
-                      <ul class="pl-48 pr-2 pt-1 pb-2 space-y-0.5">
-                        <li
-                          :for={c <- take_limit(r.commits, @prefs.commit_limit)}
-                          class="flex items-center gap-2 text-[11px]"
-                        >
-                          <span class="font-mono opacity-60 shrink-0">{short_sha(c.sha)}</span>
-                          <span class="truncate grow opacity-70" title={c.author}>{author_label(
-                            c.author
-                          )}</span>
-                          <span class="opacity-50 shrink-0">{relative_age(c.committed_at)}</span>
-                          <span class="opacity-70 shrink-0 tabular-nums">+{c.churn}</span>
-                        </li>
-                        <li
-                          :if={commits_hidden(r.commits, @prefs.commit_limit) > 0}
-                          class="text-[11px] opacity-40 pl-1"
-                        >
-                          + {commits_hidden(r.commits, @prefs.commit_limit)} more
-                        </li>
-                      </ul>
-                    </details>
-                  </li>
-                </ol>
-              </div>
-              <div
-                :if={@xray.buckets != []}
-                class="flex justify-between text-[11px] opacity-50 mt-1"
-                style="margin-left: 12.5rem; max-width: 13rem"
-              >
-                <span>{List.first(@xray.buckets).label}</span>
-                <span>{List.last(@xray.buckets).label}</span>
-              </div>
-              <p :if={@extra > 0} class="text-[11px] opacity-40 mt-1">+ {@extra} more regions</p>
-              <p class="text-[11px] opacity-40 mt-3 leading-snug">
-                Regions are git diff section headings: accurate for languages git has a
-                driver for, approximate otherwise.
-              </p>
-            </div>
-
-            <div :if={@xray.coupling != []}>
-              <div class="text-xs opacity-60 mb-2">
-                Changes together with (temporal coupling, share of this file's commits)
-              </div>
-              <ul class="space-y-1 max-w-2xl">
-                <li :for={c <- @xray.coupling}>
-                  <button
-                    type="button"
-                    phx-click="xray"
-                    phx-value-path={c.path}
-                    class="w-full flex items-center gap-2 text-left px-1 py-0.5 rounded hover:bg-base-200"
-                    title={"drill into #{c.path}"}
-                  >
-                    <span class="font-mono text-xs truncate grow">{c.path}</span>
-                    <span
-                      class="h-1.5 rounded bg-primary/60 shrink-0"
-                      style={"width: #{round(c.coupling * 60)}px"}
-                    />
-                    <span class="text-[11px] opacity-60 shrink-0 w-24 text-right">
-                      {round(c.coupling * 100)}% · {c.shared_commits}c
-                    </span>
-                  </button>
-                </li>
-              </ul>
-            </div>
-            <p :if={@xray.coupling == []} class="text-xs opacity-40">
-              No notable cross-file coupling.
-            </p>
-          </div>
-
-          <div :if={@prefs.show_source} class="grow min-w-0 lg:h-full">
-            <.source_pane source={@xray[:source]} />
-          </div>
-        </div>
-      </div>
-    </div>
-    """
-  end
-
-  # --- Coupling graph ("cloud") overlay --------------------------------------
-  # Force-directed neighbourhood of the X-Rayed file: nodes are files, an edge means
-  # they change together, node color ramps with how often a file is coupled (hubs run
-  # hot). Layout + interaction live in the `CouplingGraph` JS hook; this just frames
-  # it with a header, a depth selector, and the mount point.
-
-  attr(:graph, :map, required: true)
-
-  defp coupling_graph_view(assigns) do
-    ~H"""
-    <div class="absolute inset-0 z-20 bg-base-100 flex flex-col">
-      <div class="sticky top-0 z-10 flex items-center gap-3 px-4 py-2 border-b border-base-300 bg-base-100/95 backdrop-blur">
-        <button type="button" phx-click="close_coupling_graph" class="btn btn-sm btn-ghost gap-1">
-          <.icon name="hero-arrow-left" class="size-4" /> Back to X-Ray
-        </button>
-        <span class="font-mono text-xs truncate opacity-70" title={@graph.path}>
-          {Path.basename(@graph.path)} · coupling cloud
-        </span>
-        <form phx-change="set_graph_depth" class="ml-auto flex items-center gap-2 text-xs opacity-70">
-          <label for="graph-depth">depth</label>
-          <select id="graph-depth" name="depth" class="select select-xs select-bordered">
-            <option :for={d <- 1..3} value={d} selected={d == @graph.depth}>{d}</option>
-          </select>
-        </form>
-      </div>
-
-      <div class="grow relative min-h-0">
-        <div
-          :if={@graph.state == :loading}
-          class="absolute inset-0 flex items-center justify-center gap-2 text-sm opacity-70 z-10"
-        >
-          <span class="loading loading-spinner loading-sm" /> Building coupling cloud…
-        </div>
-        <div
-          :if={@graph.state == :error}
-          class="absolute inset-0 flex items-center justify-center px-6 text-sm text-error z-10"
-        >
-          Could not build the coupling cloud.
-        </div>
-
-        <%!-- Kept mounted across depth/recenter changes; new data arrives via push_event. --%>
-        <div id="coupling-graph" phx-hook="CouplingGraph" phx-update="ignore" class="w-full h-full">
-        </div>
-
-        <div class="absolute bottom-2 left-3 text-[11px] opacity-50 leading-snug max-w-md">
-          Files that change together. Hotter = coupled to more files. Drag to nudge;
-          click a node to re-center the cloud on it.
-        </div>
-      </div>
-    </div>
-    """
-  end
-
-  # --- Source pane (blamed file in the X-Ray free area) ----------------------
-  # Current source, each line tinted by age (recent = warm) and carrying its
-  # last-change commit as a hover tooltip (sha · age · author + summary/reason).
-
-  attr(:source, :map, default: nil)
-
-  defp source_pane(assigns) do
-    src = assigns.source
-    lines = (src && src.lines) || []
-    times = lines |> Enum.map(& &1.time) |> Enum.reject(&(&1 == 0))
-    {tmin, tmax} = if(times == [], do: {0, 1}, else: {Enum.min(times), Enum.max(times)})
-
-    assigns =
-      assign(assigns,
-        lines: lines,
-        loading: is_nil(src),
-        total: (src && src.total) || 0,
-        tmin: tmin,
-        tmax: max(tmax, tmin + 1)
-      )
-
-    ~H"""
-    <div class="h-full flex flex-col min-h-0">
-      <div class="text-xs opacity-60 mb-2">
-        Source: lines tinted by age; hover for the change reason
-      </div>
-
-      <div :if={@loading} class="text-sm opacity-60">Loading source…</div>
-
-      <p :if={!@loading and @lines == []} class="text-sm opacity-60">
-        No source to show (binary file or not present at HEAD).
-      </p>
-
-      <div
-        :if={@lines != []}
-        class="grow min-h-0 overflow-auto rounded border border-base-300 bg-base-200/40"
-      >
-        <table class="font-mono text-xs leading-5 w-full">
-          <tbody>
-            <tr
-              :for={l <- @lines}
-              style={age_heat_style(l.time, @tmin, @tmax)}
-              title={"#{short_sha(l.sha)} · #{relative_age(l.time)} · #{l.author}\n#{l.summary}"}
-            >
-              <td class="px-2 text-right opacity-40 select-none align-top w-12">{l.line}</td>
-              <td class="pr-3 whitespace-pre">{l.code}</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-
-      <p :if={@total > length(@lines)} class="text-[11px] opacity-40 mt-1">
-        showing first {length(@lines)} of {@total} lines
-      </p>
-    </div>
-    """
-  end
-
-  # --- Reusable docked panel -------------------------------------------------
-
-  attr(:open, :boolean, required: true)
-  attr(:title, :string, required: true)
-  attr(:side, :string, default: "left", values: ~w(left right))
-  attr(:toggle, :string, required: true, doc: "phx-click event that flips `open`")
-  slot(:inner_block, required: true)
-
-  defp panel(assigns) do
-    ~H"""
-    <div class={[
-      "shrink-0 h-full flex flex-col bg-base-200 border-base-300 transition-[width] duration-200",
-      @side == "left" && "border-r",
-      @side == "right" && "border-l",
-      @open && "w-72",
-      !@open && "w-10"
-    ]}>
-      <div :if={@open} class="flex items-center justify-between px-3 py-2 border-b border-base-300">
-        <span class="text-sm font-semibold">{@title}</span>
-        <button type="button" phx-click={@toggle} class="btn btn-xs btn-ghost" title="Minimize">
-          <.icon name={chevron(@side, :collapse)} class="size-4" />
-        </button>
-      </div>
-
-      <div :if={@open} class="overflow-y-auto grow p-3 space-y-4">
-        {render_slot(@inner_block)}
-      </div>
-
-      <button
-        :if={!@open}
-        type="button"
-        phx-click={@toggle}
-        class="h-full w-full flex flex-col items-center gap-3 py-3 hover:bg-base-300"
-        title={"Expand #{@title}"}
-      >
-        <.icon name={chevron(@side, :expand)} class="size-4 opacity-70" />
-        <span class="text-xs opacity-70 [writing-mode:vertical-rl]">{@title}</span>
-      </button>
-    </div>
-    """
-  end
-
-  # Collapse points "into" the panel; expand points "out" toward the chart.
-  defp chevron("left", :collapse), do: "hero-chevron-double-left"
-  defp chevron("left", :expand), do: "hero-chevron-double-right"
-  defp chevron("right", :collapse), do: "hero-chevron-double-right"
-  defp chevron("right", :expand), do: "hero-chevron-double-left"
-
-  # --- Top bar ---------------------------------------------------------------
-  # Repository/database management, the scope breadcrumb, and the theme toggle.
-
-  attr(:dbs, :list, required: true)
-  attr(:current, :string, default: nil)
-  attr(:scope, :string, required: true)
-  attr(:time_range, :any, required: true)
-
-  defp top_bar(assigns) do
-    {from_str, to_str} = custom_dates(assigns.time_range)
-
-    assigns =
-      assign(assigns, preset: time_range_key(assigns.time_range), from: from_str, to: to_str)
-
-    ~H"""
-    <header class="shrink-0 h-12 flex items-center gap-3 px-3 border-b border-base-300 bg-base-200">
-      <span class="font-semibold text-sm whitespace-nowrap">Hotspot</span>
-
-      <form id="db-form" phx-change="open_db" class="shrink-0">
-        <select name="db" class="select select-bordered select-sm" title="Open database">
-          <option value="" disabled selected={is_nil(@current)}>Choose database…</option>
-          <option :for={db <- @dbs} value={db.path} selected={@current == db.path}>
-            {db.name}
-          </option>
-        </select>
-      </form>
-
-      <button type="button" phx-click="open_picker" class="btn btn-sm btn-primary shrink-0">
-        <.icon name="hero-folder-open" class="size-4" /> Open repository…
-      </button>
-
-      <%!-- Breadcrumb of the current scope; clicking a crumb re-roots the map there. --%>
-      <.breadcrumb :if={@current} scope={@scope} />
-
-      <div class="ml-auto flex items-center gap-2 shrink-0">
-        <button
-          :if={@current}
-          type="button"
-          phx-click="toggle_palette"
-          class="btn btn-sm btn-ghost gap-1"
-          title="Go to file or folder"
-        >
-          <.icon name="hero-magnifying-glass" class="size-4" />
-          <kbd class="kbd kbd-sm hidden sm:inline">⌘P</kbd>
-        </button>
-
-        <%!-- Global analysis window. "Custom…" reveals a from/to date pair. --%>
-        <form
-          id="time-range-form"
-          phx-change="set_time_range"
-          class="flex items-center gap-2"
-          title="Analysis time range"
-        >
-          <.icon name="hero-clock" class="size-5 opacity-70" />
-          <select name="preset" class="select select-bordered select-sm min-w-32">
-            <option :for={{label, value} <- time_presets()} value={value} selected={value == @preset}>
-              {label}
-            </option>
-            <option value="custom" selected={@preset == "custom"}>Custom…</option>
-          </select>
-          <input
-            :if={@preset == "custom"}
-            type="date"
-            name="from"
-            value={@from}
-            class="input input-bordered input-sm"
-          />
-          <input
-            :if={@preset == "custom"}
-            type="date"
-            name="to"
-            value={@to}
-            class="input input-bordered input-sm"
-          />
-        </form>
-
-        <Layouts.theme_toggle />
-      </div>
-    </header>
-    """
-  end
-
-  # --- Scope breadcrumb ------------------------------------------------------
-  # Trail of the current scope path. Each crumb re-roots the map (and the list)
-  # at that ancestor via `scope_to`; the leading "root" crumb resets to `""`.
-
-  attr(:scope, :string, required: true)
-
-  defp breadcrumb(assigns) do
-    assigns = assign(assigns, crumbs: scope_crumbs(assigns.scope))
-
-    ~H"""
-    <nav class="flex items-center gap-1 text-xs min-w-0 overflow-hidden">
-      <button
-        type="button"
-        phx-click="scope_to"
-        phx-value-path=""
-        class={["btn btn-ghost btn-xs px-1", @scope == "" && "btn-active"]}
-        title="Whole repository"
-      >
-        <.icon name="hero-home" class="size-3.5" />
-      </button>
-      <span :for={{label, path} <- @crumbs} class="flex items-center gap-1 min-w-0">
-        <.icon name="hero-chevron-right" class="size-3 opacity-40 shrink-0" />
-        <button
-          type="button"
-          phx-click="scope_to"
-          phx-value-path={path}
-          class={["btn btn-ghost btn-xs px-1 font-mono truncate", path == @scope && "btn-active"]}
-          title={path}
-        >
-          {label}
-        </button>
-      </span>
-    </nav>
-    """
-  end
-
-  # "lib/a/b" -> [{"lib", "lib"}, {"a", "lib/a"}, {"b", "lib/a/b"}]; [] for the root.
-  defp scope_crumbs(""), do: []
-
-  defp scope_crumbs(scope) do
-    scope
-    |> String.split("/")
-    |> Enum.reduce({[], ""}, fn seg, {acc, prefix} ->
-      path = if prefix == "", do: seg, else: prefix <> "/" <> seg
-      {[{seg, path} | acc], path}
-    end)
-    |> elem(0)
-    |> Enum.reverse()
-  end
-
-  # --- Command palette (fuzzy finder) ----------------------------------------
-  # Overlay listing matching files/folders. Selecting a file opens its X-Ray, a
-  # folder sets the scope (same grammar as a map click).
-
-  attr(:query, :string, required: true)
-  attr(:results, :list, required: true)
-
-  defp command_palette(assigns) do
-    ~H"""
-    <div
-      class="fixed inset-0 z-50 flex items-start justify-center pt-[12vh] bg-black/40"
-      phx-window-keydown="close_palette"
-      phx-key="Escape"
-    >
-      <div
-        class="bg-base-100 rounded-lg shadow-xl w-[36rem] max-w-[92vw] max-h-[70vh] flex flex-col"
-        phx-click-away="close_palette"
-      >
-        <form phx-change="palette_search" class="p-2 border-b border-base-300">
-          <input
-            type="text"
-            name="q"
-            value={@query}
-            autocomplete="off"
-            autofocus
-            phx-debounce="80"
-            placeholder="Go to file or folder…"
-            class="input input-bordered input-sm w-full"
-          />
-        </form>
-
-        <ul class="overflow-y-auto p-1">
-          <li :if={@results == []} class="px-3 py-2 text-sm opacity-60">No matches.</li>
-          <li :for={e <- @results}>
-            <button
-              type="button"
-              phx-click="palette_select"
-              phx-value-path={e.path}
-              phx-value-kind={Atom.to_string(e.kind)}
-              class="w-full text-left flex items-center gap-2 px-3 py-1.5 rounded hover:bg-base-200"
-            >
-              <.icon
-                name={if e.kind == :folder, do: "hero-folder", else: "hero-document"}
-                class="size-4 shrink-0 opacity-60"
-              />
-              <span class="font-mono text-sm truncate">{e.path}</span>
-              <span :if={e.kind == :folder} class="ml-auto text-[11px] opacity-40 shrink-0">
-                folder
-              </span>
-            </button>
-          </li>
-        </ul>
-      </div>
-    </div>
-    """
-  end
-
-  # --- Controls panel body ---------------------------------------------------
-
-  attr(:metric, :string, required: true)
-  attr(:metrics, :list, required: true)
-  attr(:color_by, :string, required: true)
-  attr(:color_modes, :list, required: true)
-  attr(:include_removed, :boolean, required: true)
-  attr(:removed_filter_available, :boolean, required: true)
-  attr(:show_labels, :boolean, required: true)
-
-  defp controls(assigns) do
-    ~H"""
-    <form id="options-form" phx-change="update" class="space-y-3">
-      <label class="flex flex-col gap-1">
-        <span class="text-sm">Metric (size)</span>
-        <select name="metric" class="select select-bordered select-sm">
-          <option :for={{label, value} <- @metrics} value={value} selected={value == @metric}>
-            {label}
-          </option>
-        </select>
-      </label>
-
-      <label class="flex flex-col gap-1">
-        <span class="text-sm">Color by</span>
-        <select name="color_by" class="select select-bordered select-sm">
-          <option :for={{label, value} <- @color_modes} value={value} selected={value == @color_by}>
-            {label}
-          </option>
-        </select>
-      </label>
-
-      <label
-        class={["flex items-center gap-2", @removed_filter_available && "cursor-pointer"]}
-        title={
-          !@removed_filter_available &&
-            "Needs runner support (tracked_file snapshot); re-extract with the updated runner."
-        }
-      >
-        <input type="hidden" name="include_removed" value="false" />
-        <input
-          type="checkbox"
-          name="include_removed"
-          value="true"
-          checked={@include_removed}
-          disabled={!@removed_filter_available}
-          class="checkbox checkbox-sm"
-        />
-        <span class={["text-sm", !@removed_filter_available && "opacity-50"]}>
-          Include removed / renamed files
-        </span>
-      </label>
-
-      <label class="flex items-center gap-2 cursor-pointer">
-        <input type="hidden" name="show_labels" value="false" />
-        <input
-          type="checkbox"
-          name="show_labels"
-          value="true"
-          checked={@show_labels}
-          class="checkbox checkbox-sm"
-        />
-        <span class="text-sm">Show labels</span>
-      </label>
-    </form>
-    """
-  end
-
-  # The left panel names the view it controls: the coupling cloud (a child overlay of
-  # X-Ray) wins, then X-Ray, then the default hotspots chart.
-  defp view_panel_title(coupling_graph, _xray) when not is_nil(coupling_graph), do: "Coupling"
-  defp view_panel_title(_coupling_graph, xray) when not is_nil(xray), do: "X-Ray"
-  defp view_panel_title(_coupling_graph, _xray), do: "Hotspots"
-
-  # Render-time controls for the X-Ray dashboard, shown in place of the map controls
-  # while a file is X-Rayed. Every field slices data already in `@xray`, so changes
-  # re-render instantly with no refetch.
-  attr(:prefs, :map, required: true)
-  attr(:sorts, :list, required: true)
-  attr(:region_opts, :list, required: true)
-  attr(:commit_opts, :list, required: true)
-
-  defp xray_controls(assigns) do
-    ~H"""
-    <form id="xray-form" phx-change="set_xray_view" class="space-y-3">
-      <label class="flex flex-col gap-1">
-        <span class="text-sm">Sort regions by</span>
-        <select name="sort" class="select select-bordered select-sm">
-          <option :for={{label, value} <- @sorts} value={value} selected={value == @prefs.sort}>
-            {label}
-          </option>
-        </select>
-      </label>
-
-      <label class="flex flex-col gap-1">
-        <span class="text-sm">Regions shown</span>
-        <select name="region_limit" class="select select-bordered select-sm">
-          <option
-            :for={{label, value} <- @region_opts}
-            value={value}
-            selected={value == to_string(@prefs.region_limit)}
-          >
-            {label}
-          </option>
-        </select>
-      </label>
-
-      <label class="flex flex-col gap-1">
-        <span class="text-sm">Commits per region</span>
-        <select name="commit_limit" class="select select-bordered select-sm">
-          <option
-            :for={{label, value} <- @commit_opts}
-            value={value}
-            selected={value == to_string(@prefs.commit_limit)}
-          >
-            {label}
-          </option>
-        </select>
-      </label>
-
-      <label class="flex items-center gap-2 cursor-pointer">
-        <input type="hidden" name="hide_unattributed" value="false" />
-        <input
-          type="checkbox"
-          name="hide_unattributed"
-          value="true"
-          checked={@prefs.hide_unattributed}
-          class="checkbox checkbox-sm"
-        />
-        <span class="text-sm">Hide unattributed region</span>
-      </label>
-
-      <label class="flex items-center gap-2 cursor-pointer">
-        <input type="hidden" name="show_source" value="false" />
-        <input
-          type="checkbox"
-          name="show_source"
-          value="true"
-          checked={@prefs.show_source}
-          class="checkbox checkbox-sm"
-        />
-        <span class="text-sm">Show source pane</span>
-      </label>
-
-      <button type="button" phx-click="reset_xray_view" class="btn btn-sm btn-outline w-full">
-        Reset
-      </button>
-    </form>
-    """
-  end
-
-  # Live force-layout sliders for the coupling cloud, shown in place of the map
-  # controls while the graph is open. Each change pushes to the `CouplingGraph` hook,
-  # which re-tunes the running simulation without refetching (positions are kept).
-  attr(:params, :map, required: true)
-
-  defp coupling_controls(assigns) do
-    assigns = assign(assigns, :specs, @coupling_param_specs)
-
-    ~H"""
-    <form id="coupling-form" phx-change="set_coupling_params" class="space-y-3">
-      <label :for={{key, _default, min, max, step, label} <- @specs} class="flex flex-col gap-1">
-        <span class="text-sm flex items-center justify-between gap-2">
-          {label}
-          <span class="opacity-50 font-mono text-xs">{fmt_param(@params[key])}</span>
-        </span>
-        <input
-          type="range"
-          name={key}
-          min={min}
-          max={max}
-          step={step}
-          value={@params[key]}
-          class="range range-xs"
-        />
-      </label>
-
-      <button type="button" phx-click="reset_coupling_params" class="btn btn-sm btn-outline w-full">
-        Reset
-      </button>
-    </form>
-    """
-  end
-
-  # Compact slider readout: drop a trailing ".0" but keep real fractional values.
-  defp fmt_param(value) when is_integer(value), do: Integer.to_string(value)
-
-  defp fmt_param(value) when is_float(value) do
-    if value == Float.round(value),
-      do: value |> trunc() |> Integer.to_string(),
-      else: :erlang.float_to_binary(value, decimals: 2)
-  end
-
-  # Server-rendered hotspot scatter: x = revisions (change frequency), y = indentation
-  # complexity, dot area = churn. Median guides split it into quadrants; the top-right
-  # (often-changed AND complex) is the prioritize-for-refactoring zone.
-  @scatter_w 1000
-  @scatter_h 640
-  @scatter_pad %{left: 64, right: 28, top: 28, bottom: 52}
-
-  attr(:points, :list, required: true)
-
-  defp scatter_plot(assigns) do
-    assigns =
-      assigns
-      |> assign(:geom, scatter_geometry(assigns.points))
-      |> assign(:w, @scatter_w)
-      |> assign(:h, @scatter_h)
-
-    ~H"""
-    <div
-      id="scatter-plot"
-      phx-hook="Scatter"
-      class="w-full h-full flex items-center justify-center p-4"
-    >
-      <p :if={@geom == :empty} class="text-sm opacity-60 text-center">
-        No files with complexity metrics in view.
-      </p>
-      <svg
-        :if={@geom != :empty}
-        viewBox={"0 0 #{@w} #{@h}"}
-        preserveAspectRatio="xMidYMid meet"
-        class="w-full h-full"
-      >
-        <%!-- Log-scale gridlines + tick labels (powers of ten) --%>
-        <g :for={t <- @geom.xticks}>
-          <line
-            x1={t.pos}
-            y1={@geom.y0}
-            x2={t.pos}
-            y2={@geom.y1}
-            class="stroke-base-200"
-            stroke-width="1"
-          />
-          <text
-            x={t.pos}
-            y={@geom.y0 + 20}
-            text-anchor="middle"
-            class="fill-base-content text-[13px] opacity-40"
-          >
-            {t.label}
-          </text>
-        </g>
-        <g :for={t <- @geom.yticks}>
-          <line
-            x1={@geom.x0}
-            y1={t.pos}
-            x2={@geom.x1}
-            y2={t.pos}
-            class="stroke-base-200"
-            stroke-width="1"
-          />
-          <text
-            x={@geom.x0 - 8}
-            y={t.pos + 4}
-            text-anchor="end"
-            class="fill-base-content text-[13px] opacity-40"
-          >
-            {t.label}
-          </text>
-        </g>
-
-        <%!-- Axes --%>
-        <line
-          x1={@geom.x0}
-          y1={@geom.y0}
-          x2={@geom.x1}
-          y2={@geom.y0}
-          class="stroke-base-300"
-          stroke-width="1"
-        />
-        <line
-          x1={@geom.x0}
-          y1={@geom.y0}
-          x2={@geom.x0}
-          y2={@geom.y1}
-          class="stroke-base-300"
-          stroke-width="1"
-        />
-
-        <%!-- Median quadrant guides --%>
-        <line
-          x1={@geom.vline}
-          y1={@geom.y0}
-          x2={@geom.vline}
-          y2={@geom.y1}
-          class="stroke-base-300"
-          stroke-width="1"
-          stroke-dasharray="4 4"
-        />
-        <line
-          x1={@geom.x0}
-          y1={@geom.hline}
-          x2={@geom.x1}
-          y2={@geom.hline}
-          class="stroke-base-300"
-          stroke-width="1"
-          stroke-dasharray="4 4"
-        />
-
-        <text
-          x={@geom.x1}
-          y={@geom.y0 + 32}
-          text-anchor="end"
-          class="fill-base-content text-[18px] opacity-70"
-        >
-          revisions →
-        </text>
-        <text
-          x={@geom.x0 - 44}
-          y={@geom.y1 - 8}
-          text-anchor="start"
-          class="fill-base-content text-[18px] opacity-70"
-        >
-          ↑ indentation complexity
-        </text>
-        <text
-          x={@geom.x1 - 6}
-          y={@geom.y1 + 20}
-          text-anchor="end"
-          class="fill-error text-[16px] opacity-80"
-        >
-          prioritize
-        </text>
-
-        <circle
-          :for={p <- @geom.points}
-          cx={p.cx}
-          cy={p.cy}
-          r={p.r}
-          class={[
-            (p.top_right && "fill-error") || "fill-primary",
-            "opacity-60 hover:opacity-100 cursor-pointer"
-          ]}
-          data-xray-path={p.path}
-        >
-          <title>
-            {p.path}: {p.revisions} revisions · complexity {p.complexity} · churn {p.churn}
-          </title>
-        </circle>
-      </svg>
-    </div>
-    """
-  end
-
-  # Map raw points into SVG geometry, or :empty when there is nothing to plot.
-  defp scatter_geometry([]), do: :empty
-
-  defp scatter_geometry(points) do
-    x0 = @scatter_pad.left
-    x1 = @scatter_w - @scatter_pad.right
-    y0 = @scatter_h - @scatter_pad.bottom
-    y1 = @scatter_pad.top
-
-    # Revisions and complexity are heavily right-skewed (a few files dominate), so
-    # both axes are log-scaled to spread the cloud out instead of piling it at the origin.
-    max_rev = points |> Enum.map(& &1.revisions) |> Enum.max() |> max(1)
-    max_cx = points |> Enum.map(& &1.indent_total) |> Enum.max() |> max(1)
-    max_churn = points |> Enum.map(& &1.churn) |> Enum.max() |> max(1)
-
-    lx = :math.log10(max_rev + 1)
-    ly = :math.log10(max_cx + 1)
-    xpos = fn v -> x0 + (x1 - x0) * log_frac(v, lx) end
-    ypos = fn v -> y0 - (y0 - y1) * log_frac(v, ly) end
-
-    med_rev = median(Enum.map(points, & &1.revisions))
-    med_cx = median(Enum.map(points, & &1.indent_total))
-
-    scaled =
-      Enum.map(points, fn p ->
-        %{
-          path: p.path,
-          revisions: p.revisions,
-          complexity: p.indent_total,
-          churn: p.churn,
-          cx: xpos.(p.revisions),
-          cy: ypos.(p.indent_total),
-          r: 4 + 16 * :math.sqrt(p.churn / max_churn),
-          top_right: p.revisions >= med_rev and p.indent_total >= med_cx
-        }
-      end)
-
-    %{
-      x0: x0,
-      x1: x1,
-      y0: y0,
-      y1: y1,
-      vline: xpos.(med_rev),
-      hline: ypos.(med_cx),
-      xticks: Enum.map(log_ticks(max_rev), &%{pos: xpos.(&1), label: tick_label(&1)}),
-      yticks: Enum.map(log_ticks(max_cx), &%{pos: ypos.(&1), label: tick_label(&1)}),
-      points: scaled
-    }
-  end
-
-  # Fraction along a log axis whose span is `log_max` (= log10(max + 1)).
-  defp log_frac(_v, +0.0), do: 0.0
-  defp log_frac(v, log_max), do: :math.log10(v + 1) / log_max
-
-  # Powers of ten up to `max` (1, 10, 100, ...), the natural ticks on a log axis.
-  defp log_ticks(max) do
-    Stream.iterate(1, &(&1 * 10))
-    |> Enum.take_while(&(&1 <= max))
-  end
-
-  defp tick_label(n) when n >= 1000, do: "#{div(n, 1000)}k"
-  defp tick_label(n), do: Integer.to_string(n)
-
-  defp median([]), do: 0
-
-  defp median(values) do
-    sorted = Enum.sort(values)
-    n = length(sorted)
-    mid = div(n, 2)
-
-    if rem(n, 2) == 1 do
-      Enum.at(sorted, mid)
-    else
-      (Enum.at(sorted, mid - 1) + Enum.at(sorted, mid)) / 2
-    end
-  end
-
-  # --- Top hotspots panel body -----------------------------------------------
-
-  attr(:current, :string, default: nil)
-  attr(:scope, :string, required: true)
-  attr(:sort, :string, required: true)
-  attr(:sorts, :list, required: true)
-  attr(:hotspots, :list, required: true)
-
-  defp top_hotspots(assigns) do
-    ~H"""
-    <p :if={is_nil(@current)} class="text-sm opacity-60">Open a database first.</p>
-
-    <div :if={@current}>
-      <form id="scope-form" phx-change="set_scope" class="mb-3">
-        <label class="flex flex-col gap-1">
-          <span class="text-sm">Scope</span>
-          <select name="scope" class="select select-bordered select-sm">
-            <option value="files" selected={@scope == "files"}>Files</option>
-            <option value="folders" selected={@scope == "folders"}>Folders</option>
-          </select>
-        </label>
-      </form>
-
-      <form id="sort-form" phx-change="set_sort" class="mb-3">
-        <label class="flex flex-col gap-1">
-          <span class="text-sm">Sort by</span>
-          <select name="sort" class="select select-bordered select-sm">
-            <option :for={{label, value} <- @sorts} value={value} selected={value == @sort}>
-              {label}
-            </option>
-          </select>
-        </label>
-      </form>
-
-      <p :if={@hotspots == []} class="text-sm opacity-60">No data.</p>
-
-      <%!-- Click grammar matches the map: a folder row re-roots the scope, a file
-      row opens its X-Ray. The panel's Scope selector decides which kind a row is. --%>
-      <ol class="space-y-0.5">
-        <li :for={{h, i} <- Enum.with_index(@hotspots, 1)}>
-          <button
-            type="button"
-            phx-click={if @scope == "folders", do: "scope_to", else: "xray"}
-            phx-value-path={h.path}
-            class="w-full text-left flex gap-2 px-2 py-1.5 rounded hover:bg-base-300"
-            title={h.path}
-          >
-            <span class="text-xs opacity-40 tabular-nums w-5 shrink-0 pt-0.5">{i}</span>
-
-            <span class="grow min-w-0 flex flex-col gap-0.5">
-              <%!-- line 1: filename + sorted metric --%>
-              <span class="flex items-baseline gap-2">
-                <span class="font-mono text-sm font-medium truncate grow">
-                  {Path.basename(h.path)}
-                </span>
-                <span class="text-xs opacity-70 tabular-nums shrink-0">
-                  {sort_value(h, @sort)}
-                </span>
-              </span>
-
-              <%!-- line 2: directory + risk badges --%>
-              <span class="flex items-center gap-1.5 text-[11px]">
-                <span class="path-tail font-mono opacity-45 truncate grow min-w-0">
-                  {dir_label(h.path)}
-                </span>
-                <span
-                  :if={h[:bus_factor?]}
-                  class="text-warning shrink-0"
-                  title={"#{round((h.ownership || 0) * 100)}% owned by #{author_label(h.main_author)}: bus-factor risk"}
-                >⚠</span>
-                <span
-                  :if={h[:abandoned?]}
-                  title={"owner #{author_label(h.main_author)} has gone inactive: abandoned knowledge"}
-                  class="shrink-0"
-                >
-                  <.icon name="hero-user-minus" class="size-3 opacity-60" />
-                </span>
-                <span
-                  :if={defect_badge?(h)}
-                  class="text-error shrink-0 tabular-nums"
-                  title={"#{round(h.bug_fix_density * 100)}% of commits are bug fixes"}
-                >
-                  🐛 {round(h.bug_fix_density * 100)}%
-                </span>
-                <span :if={badge = trend_badge(h)} class={badge.class} title={badge.help}>
-                  {badge.marker}
-                </span>
-              </span>
-            </span>
-          </button>
-        </li>
-      </ol>
-    </div>
-    """
-  end
-
-  # Directory portion of a hotspot path; blank for repo-root files.
-  defp dir_label(path) do
-    case Path.dirname(path) do
-      "." -> ""
-      dir -> dir
-    end
-  end
-
-  # The value shown per row is the one being sorted on.
-  defp sort_value(h, "author_count"), do: "#{h.author_count}a"
-  defp sort_value(h, "recency_churn"), do: h.recency_churn
-  defp sort_value(h, "last_changed"), do: relative_age(h.last_changed)
-  defp sort_value(h, "revisions"), do: "#{h.revisions}×"
-  defp sort_value(h, _churn), do: h.churn
-
-  # Show the defect badge only when fixes are a meaningful share of the file's
-  # history, so a single incidental fix on a young file does not light it up.
-  defp defect_badge?(%{bug_fix_density: d}) when is_float(d), do: d >= 0.25
-  defp defect_badge?(_), do: false
-
-  # Rising/cooling badge: recent churn vs the prior half-life window. Stable files
-  # (and older dbs without the metric) show nothing.
-  defp trend_badge(%{trend: :rising}) do
-    %{
-      marker: "▲",
-      class: "text-xs text-error shrink-0",
-      help: "rising: more churn in the last window than before"
-    }
-  end
-
-  defp trend_badge(%{trend: :cooling}) do
-    %{
-      marker: "▼",
-      class: "text-xs text-info shrink-0",
-      help: "cooling: less churn in the last window than before"
-    }
-  end
-
-  defp trend_badge(_), do: nil
-
-  # Compact "time ago" label for an epoch second, e.g. "3d", "5mo", "2y".
-  defp relative_age(epoch) when is_integer(epoch) and epoch > 0 do
-    days = div(System.os_time(:second) - epoch, 86_400)
-
-    cond do
-      days <= 0 -> "today"
-      days < 30 -> "#{days}d"
-      days < 365 -> "#{div(days, 30)}mo"
-      true -> "#{div(days, 365)}y"
-    end
-  end
-
-  defp relative_age(_), do: "—"
-
-  # --- X-Ray helpers ---------------------------------------------------------
-
-  defp short_sha(sha) when is_binary(sha), do: String.slice(sha, 0, 7)
-  defp short_sha(_), do: ""
-
-  # Author email -> local part for a compact label (full email kept in `title`).
-  defp author_label(email) when is_binary(email), do: email |> String.split("@") |> hd()
-  defp author_label(_), do: "?"
-
-  defp unattributed_name, do: "(unattributed)"
-
-  defp unattributed_help do
-    "Churn git couldn't tie to a named region: a new file's bulk add, edits " <>
-      "above the first definition, or a file type git has no diff driver for."
-  end
-
-  # Heatmap cell: faint grid for no churn, else a warm fill scaled (sqrt for
-  # perceptual spread) by the cell's share of the busiest cell.
-  defp heat_style(0, _max), do: "background-color: rgba(127,127,127,0.06)"
-
-  defp heat_style(v, max) do
-    alpha = Float.round(0.15 + 0.85 * :math.sqrt(v / max), 3)
-    "background-color: rgba(220,70,60,#{alpha})"
-  end
-
-  # Source-line tint by recency within the file: oldest faint, newest warm. Kept
-  # subtle (max ~0.34 alpha) so code stays readable.
-  defp age_heat_style(0, _min, _max), do: ""
-
-  defp age_heat_style(time, min, max) do
-    t = (time - min) / (max - min)
-    alpha = Float.round(0.04 + 0.30 * t, 3)
-    "background-color: rgba(220,70,60,#{alpha})"
-  end
-
-  # Knowledge-concentration flag: one author owns most of a region's churn, and it
-  # changed more than once (a single-commit region is trivially 100%-owned).
-  defp owner_risk?(r), do: r.top_author_share >= 0.8 and r.commit_count > 1
-
-  defp cohesion_verdict(x) when x < 1.5, do: "focused changes"
-  defp cohesion_verdict(x) when x < 2.5, do: "moderate"
-  defp cohesion_verdict(_), do: "low: changes span many regions"
-
-  # --- Extraction banner -----------------------------------------------------
-
-  attr(:extraction, :map, required: true)
-
-  defp extraction_banner(assigns) do
-    ~H"""
-    <div class="absolute top-3 left-1/2 -translate-x-1/2 z-30 w-[28rem] max-w-[90vw]">
-      <div class={[
-        "alert shadow-lg flex items-center gap-3 py-2",
-        @extraction.state == :error && "alert-error",
-        @extraction.state == :done && "alert-success"
-      ]}>
-        <span :if={@extraction.state == :running} class="loading loading-spinner loading-sm" />
-        <div class="text-sm grow min-w-0">
-          <%= case @extraction.state do %>
-            <% :running -> %>
-              <span class="truncate">
-                Extracting <span class="font-mono">{Path.basename(@extraction.repo || "")}</span>…
-                <span :if={@extraction.commits > 0}>{@extraction.commits} commits</span>
-              </span>
-            <% :done -> %>
-              Extracted <span class="font-mono">{Path.basename(@extraction.repo || "")}</span>
-              ({@extraction.commits} commits).
-            <% :error -> %>
-              Extraction failed: {@extraction.reason}
-          <% end %>
-        </div>
-        <button
-          :if={@extraction.state != :running}
-          type="button"
-          phx-click="dismiss_extraction"
-          class="btn btn-xs btn-ghost"
-        >
-          <.icon name="hero-x-mark" class="size-4" />
-        </button>
-      </div>
-    </div>
-    """
-  end
-
-  # --- Repository picker (server-side directory browser) ---------------------
-
-  attr(:dir, :string, required: true)
-  attr(:root, :string, required: true)
-  attr(:entries, :list, required: true)
-
-  defp repo_picker(assigns) do
-    ~H"""
-    <div class="fixed inset-0 z-40 flex items-center justify-center bg-black/40">
-      <div
-        class="bg-base-100 rounded-lg shadow-xl w-[34rem] max-w-[92vw] h-[32rem] max-h-[85vh] flex flex-col"
-        phx-click-away="close_picker"
-      >
-        <div class="flex items-center justify-between px-4 py-3 border-b border-base-300">
-          <span class="font-semibold">Open repository</span>
-          <button type="button" phx-click="close_picker" class="btn btn-xs btn-ghost">
-            <.icon name="hero-x-mark" class="size-4" />
-          </button>
-        </div>
-
-        <div class="px-4 py-2 border-b border-base-300 flex items-center gap-2 text-xs">
-          <button
-            type="button"
-            phx-click="picker_nav"
-            phx-value-path={Path.dirname(@dir)}
-            disabled={@dir == @root}
-            class="btn btn-xs btn-ghost"
-            title="Up"
-          >
-            <.icon name="hero-arrow-up" class="size-4" />
-          </button>
-          <span class="font-mono truncate opacity-70">{@dir}</span>
-        </div>
-
-        <ul class="overflow-y-auto grow p-2 space-y-0.5">
-          <li :if={@entries == []} class="text-sm opacity-60 px-2 py-1">No subdirectories.</li>
-          <li :for={e <- @entries}>
-            <div class="flex items-center gap-1">
-              <button
-                type="button"
-                phx-click="picker_nav"
-                phx-value-path={e.path}
-                class="grow text-left flex items-center gap-2 px-2 py-1 rounded hover:bg-base-200 min-w-0"
-              >
-                <.icon
-                  name={if e.is_repo, do: "hero-folder-open", else: "hero-folder"}
-                  class={["size-4 shrink-0", e.is_repo && "text-primary"]}
-                />
-                <span class="font-mono text-sm truncate">{e.name}</span>
-              </button>
-              <button
-                :if={e.is_repo}
-                type="button"
-                phx-click="pick_repo"
-                phx-value-path={e.path}
-                class="btn btn-xs btn-primary shrink-0"
-              >
-                Extract
-              </button>
-            </div>
-          </li>
-        </ul>
-
-        <div class="px-4 py-2 border-t border-base-300 text-xs opacity-60">
-          Folders with a <code class="font-mono">.git</code>
-          are marked; click <span class="font-semibold">Extract</span>
-          to analyze.
-        </div>
-      </div>
-    </div>
-    """
-  end
-
-  # --- Directory-picker helpers ----------------------------------------------
-
-  # Root the picker is confined to (no navigating above it). Defaults to $HOME.
-  defp repo_root do
-    Application.get_env(:hotspot_web, :repo_root) || System.user_home!()
-  end
-
-  defp within_root?(path, root) do
-    path = Path.expand(path)
-    path == root or String.starts_with?(path <> "/", root <> "/")
-  end
-
-  # Immediate subdirectories of `dir` (skipping hidden ones), each flagged for
-  # whether it is itself a git repo.
-  defp list_dirs(dir) do
-    case File.ls(dir) do
-      {:ok, names} ->
-        names
-        |> Enum.reject(&String.starts_with?(&1, "."))
-        |> Enum.map(&Path.join(dir, &1))
-        |> Enum.filter(&File.dir?/1)
-        |> Enum.sort()
-        |> Enum.map(fn p ->
-          %{name: Path.basename(p), path: p, is_repo: File.dir?(Path.join(p, ".git"))}
-        end)
-
-      {:error, _} ->
-        []
-    end
   end
 
   defp storage, do: Application.get_env(:hotspot, :storage, Storage)
