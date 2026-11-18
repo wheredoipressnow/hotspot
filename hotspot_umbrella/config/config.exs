@@ -29,7 +29,7 @@ config :esbuild,
   ]
 
 config :tailwind,
-  version: "4.3.0",
+  version: "4.3.3",
   path: System.get_env("TAILWINDCSS_PATH"),
   hotspot_web: [
     args: ~w(
